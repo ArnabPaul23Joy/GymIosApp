@@ -58,6 +58,11 @@ nonisolated enum ExerciseTypeAnalyzer {
         "pullup": "Pull-up",
         "pushup": "Push-up",
         "squat": "Squat",
+        "legraise": "Hanging Leg Raise",
+        "skipping": "Skipping",
+        "squatpress": "Squat Shoulder Press",
+        "standing": "Standing",
+        "walking": "Walking",
     ]
 
     static func displayName(for rawLabel: String) -> String {
@@ -99,36 +104,45 @@ nonisolated enum ExerciseTypeAnalyzer {
         var nextPrediction = 0.0
         var firstTimestamp: Double?
 
-        while let sample = output.copyNextSampleBuffer(), let pixelBuffer = CMSampleBufferGetImageBuffer(sample) {
-            let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-            if firstTimestamp == nil {
-                firstTimestamp = timestamp
-                nextPrediction = timestamp + classifier.windowSeconds
+        // Each iteration is wrapped in an autorelease pool — this is a tight decode loop that never
+        // returns to a run loop, so otherwise every CMSampleBuffer / Vision temporary would
+        // accumulate until iOS jetsam-kills the app for memory.
+        var reading = true
+        while reading {
+            try autoreleasepool {
+                guard let sample = output.copyNextSampleBuffer(),
+                      let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { reading = false; return }
+                let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                if firstTimestamp == nil {
+                    firstTimestamp = timestamp
+                    nextPrediction = timestamp + classifier.windowSeconds
+                }
+
+                // Pose detection, using the track's display orientation so keypoints are upright.
+                let request = VNDetectHumanBodyPoseRequest()
+                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation).perform([request])
+                let observation = PoseFeatures.closestObservation(request.results)
+
+                if let observation {
+                    let joints = normalisedJoints(from: observation)
+                    if !joints.isEmpty { poses.append(PoseFrame(time: timestamp, joints: joints)) }
+                }
+
+                // Feed the classifier's feature pipeline (26 features, oriented pixel space).
+                let features = PoseFeatures.features(from: observation, imageWidth: Double(orientedSize.width),
+                                                     imageHeight: Double(orientedSize.height), timestamp: timestamp)
+                resampler.push(features)
+
+                if timestamp >= nextPrediction, resampler.isReady() {
+                    nextPrediction += stride
+                    if let window = resampler.window(), window.coverage >= minCoverage {
+                        let prediction = try classifier.predict(window)
+                        predictions += 1
+                        votes[prediction.label, default: 0] += 1
+                        for (i, p) in prediction.probabilities.enumerated() { probabilitySum[i] += p }
+                    }
+                }
             }
-
-            // Pose detection, using the track's display orientation so keypoints are upright.
-            let request = VNDetectHumanBodyPoseRequest()
-            try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation).perform([request])
-            let observation = request.results?.first
-
-            if let observation {
-                let joints = normalisedJoints(from: observation)
-                if !joints.isEmpty { poses.append(PoseFrame(time: timestamp, joints: joints)) }
-            }
-
-            // Feed the classifier's feature pipeline (23 angles/distances, oriented pixel space).
-            let features = PoseFeatures.features(from: observation, imageWidth: Double(orientedSize.width),
-                                                 imageHeight: Double(orientedSize.height), timestamp: timestamp)
-            resampler.push(features)
-
-            guard timestamp >= nextPrediction, resampler.isReady() else { continue }
-            nextPrediction += stride
-            guard let window = resampler.window(), window.coverage >= minCoverage else { continue }
-
-            let prediction = try classifier.predict(window)
-            predictions += 1
-            votes[prediction.label, default: 0] += 1
-            for (i, p) in prediction.probabilities.enumerated() { probabilitySum[i] += p }
         }
 
         var type: Result?

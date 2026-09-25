@@ -1,23 +1,25 @@
 // LiveExerciseEngine.swift
-// Drives the live-camera pipeline: AVCaptureSession → per-frame Vision body-pose →
-// { keypoint smoothing → PoseFeatures → WindowResampler → Core ML classification,
-//   geometric StreamingRepCounter } → LiveUpdate delivered to the UI.
+// Live-camera source for the shared PoseStreamProcessor (defined below in this file). Owns the
+// AVCaptureSession and feeds each camera frame (in native landscape) to the processor with the
+// correct Vision orientation so coordinates come out upright.
 //
-// TRAIN/INFERENCE MISMATCH COMPENSATION (model was trained on video files, not live):
-//   1. WindowResampler resamples the live stream onto the model's exact 15 Hz / 2 s
-//      (30-step) grid with validity masks — identical temporal footing to training,
-//      independent of the camera's frame rate.
-//   2. Per-keypoint EMA smoothing tames live jitter so features match the cleaner
-//      decoded-video distribution the model learned.
-//   3. PoseFeatures is hip-centred + torso-scaled → invariant to camera distance/zoom;
-//      it's also reflection-invariant, so top-left coords match training math exactly.
-//   4. Confidence gating + majority-vote LabelSmoother + window-coverage gating reject
-//      noisy, low-visibility, or flickering predictions.
-//   5. A warm-up (isReady) period ("Calibrating…") until 2 s of history exists.
+// PoseStreamProcessor is the shared per-frame streaming pipeline used by BOTH the live camera
+// and the "live from gallery" modes:
+//   Vision body-pose → keypoint EMA smoothing → PoseFeatures (26) → WindowResampler →
+//   Core ML classification (stride + confidence + vote gating) → geometric StreamingRepCounter.
+//
+// TRAIN/INFERENCE MISMATCH COMPENSATION (model trained on video files, not a live stream):
+//   1. WindowResampler puts the stream onto the model's exact 15 Hz / 2 s (30-step) grid with
+//      validity masks — identical temporal footing to training, independent of frame rate.
+//   2. Per-keypoint EMA smoothing tames live jitter toward the cleaner decoded-video profile.
+//   3. PoseFeatures is hip-centred + torso-scaled (distance-invariant) and reflection-invariant.
+//   4. Confidence + coverage + majority-vote gating reject noisy/unsure/flickering predictions.
+//   5. Warm-up ("Calibrating…") until a full 2 s window exists.
 
 import AVFoundation
 import CoreGraphics
 import CoreML
+import CoreVideo
 import Foundation
 import ImageIO
 import Vision
@@ -25,7 +27,7 @@ import Vision
 /// A snapshot pushed to the UI on every processed frame.
 struct LiveUpdate: Sendable {
     var pose: PoseFrame?
-    var orientedSize: CGSize      // upright buffer size the joints are normalised against
+    var orientedSize: CGSize      // upright image size the joints are normalised against
     var rawLabel: String?
     var displayLabel: String
     var confidence: Double
@@ -35,49 +37,25 @@ struct LiveUpdate: Sendable {
 
 nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
 
-    // Tunables
-    private let predictionStride = 0.25       // seconds between classifier predictions
-    private let minCoverage = 0.5             // skip low-visibility windows
-    private let minConfidence = 0.55          // ignore unsure classifications
-    private let keypointAlpha = 0.5           // EMA weight for keypoint smoothing
-    private let minKeypointConfidence: Float = 0.1
-
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "live.session")
     private let sampleQueue = DispatchQueue(label: "live.samples")
     private let output = AVCaptureVideoDataOutput()
+    private let processor = PoseStreamProcessor()
 
     /// Delivered on the main actor by the view model (see LiveWorkoutViewModel).
     var onUpdate: (@Sendable (LiveUpdate) -> Void)?
 
-    // Pipeline state — only ever touched on `sampleQueue`.
-    private var classifier: PoseExerciseClassifier?
-    private var resampler: WindowResampler?
-    private let smoother = LabelSmoother(size: 12)
-    private let counter = StreamingRepCounter()
-    private var emaJoints: [String: CGPoint] = [:]
-    private var nextPrediction = 0.0
-    private var firstTimestamp: Double?
-    private var currentRawLabel: String?
-    private var currentConfidence = 0.0
     private var position: AVCaptureDevice.Position = .back
 
     // MARK: - Session setup
 
-    /// Configures the session for the given camera and returns whether it succeeded.
     func configure(position: AVCaptureDevice.Position) {
         sessionQueue.async { [self] in
             self.position = position
             session.beginConfiguration()
             session.sessionPreset = .high
 
-            // Load the classifier once (compiled from ExerciseClassifier.mlpackage).
-            if classifier == nil, let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
-                classifier = try? PoseExerciseClassifier(modelURL: url)
-                resampler = classifier?.makeResampler()
-            }
-
-            // Camera input.
             session.inputs.forEach { session.removeInput($0) }
             if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
                let input = try? AVCaptureDeviceInput(device: device),
@@ -85,7 +63,6 @@ nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSa
                 session.addInput(input)
             }
 
-            // Frame output.
             if !session.outputs.contains(output) {
                 output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
                 output.alwaysDiscardsLateVideoFrames = true
@@ -97,76 +74,133 @@ nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSa
             // camera's native landscape orientation; instead we hand Vision the correct
             // CGImagePropertyOrientation per frame so its coordinates come out upright.
             session.commitConfiguration()
+
+            // Fresh pipeline for this camera/framing (on the pipeline's own queue).
+            sampleQueue.async { self.processor.reset() }
         }
     }
 
     func start() { sessionQueue.async { [self] in if !session.isRunning { session.startRunning() } } }
     func stop()  { sessionQueue.async { [self] in if session.isRunning { session.stopRunning() } } }
 
-    func resetCounter() {
-        sampleQueue.async { [self] in
-            counter.reset()
-            currentRawLabel = nil
-        }
-    }
+    func resetCounter() { sampleQueue.async { [self] in processor.resetCounter() } }
 
-    // MARK: - Per-frame pipeline (runs on sampleQueue)
+    // MARK: - Per-frame (runs on sampleQueue)
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer), let resampler else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
 
-        // The buffer is in the camera's native landscape orientation. For a device held in
-        // portrait, .right (back) / .leftMirrored (front, matches its mirrored preview) makes
-        // Vision return coordinates in upright space. A 90° orientation swaps width/height.
+        // Native landscape buffer → upright via Vision orientation. .right for back; .leftMirrored
+        // for front (matches its auto-mirrored preview). A 90° orientation swaps width/height.
         let orientation: CGImagePropertyOrientation = (position == .front) ? .leftMirrored : .right
-        let width = Double(CVPixelBufferGetHeight(pixelBuffer))
-        let height = Double(CVPixelBufferGetWidth(pixelBuffer))
-        let orientedSize = CGSize(width: width, height: height)
+        let orientedSize = CGSize(width: Double(CVPixelBufferGetHeight(pixelBuffer)),
+                                  height: Double(CVPixelBufferGetWidth(pixelBuffer)))
+
+        let update = processor.process(pixelBuffer: pixelBuffer, orientation: orientation,
+                                       timestamp: timestamp, orientedSize: orientedSize)
+        onUpdate?(update)
+    }
+}
+
+// MARK: - Shared streaming pipeline
+
+nonisolated final class PoseStreamProcessor {
+
+    // Tunables
+    private let predictionStride = 0.25       // seconds between classifier predictions
+    private let minCoverage = 0.35            // skip only very low-visibility windows
+    private let keypointAlpha = 0.5           // EMA weight for keypoint smoothing
+    private let minKeypointConfidence: Float = 0.1
+
+    private let classifier: PoseExerciseClassifier?
+    private var resampler: WindowResampler?
+    private let smoother = LabelSmoother(size: 12)
+    private let counter = StreamingRepCounter()
+    private var emaJoints: [String: CGPoint] = [:]
+    private var nextPrediction = 0.0
+    private var firstTimestamp: Double?
+    private var currentRawLabel: String?
+    private var currentConfidence = 0.0
+
+    init() {
+        if let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
+            classifier = try? PoseExerciseClassifier(modelURL: url)
+        } else {
+            classifier = nil
+        }
+        resampler = classifier?.makeResampler()
+    }
+
+    /// Full reset (new session/video): clears history, votes, and the counter.
+    func reset() {
+        resampler = classifier?.makeResampler()
+        emaJoints = [:]
+        nextPrediction = 0
+        firstTimestamp = nil
+        currentRawLabel = nil
+        currentConfidence = 0
+        counter.reset()
+    }
+
+    /// Reset just the rep tally (keeps the current label/history).
+    func resetCounter() {
+        counter.reset()
+    }
+
+    /// Process one frame and return the UI snapshot.
+    func process(pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation,
+                 timestamp: Double, orientedSize: CGSize) -> LiveUpdate {
+        let width = Double(orientedSize.width), height = Double(orientedSize.height)
 
         let request = VNDetectHumanBodyPoseRequest()
         try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation).perform([request])
-        let observation = request.results?.first
+        let observation = PoseFeatures.closestObservation(request.results)
 
-        // (1) Raw keypoints → (2) EMA smoothing.
+        // (1) raw keypoints → (2) EMA smoothing.
         let raw = normalisedJoints(from: observation)
         let smoothedJoints = smoothKeypoints(raw)
         let pose = PoseFrame(time: timestamp, joints: smoothedJoints)
 
-        // Build the classifier's 23 features from the smoothed joints (pixel space).
+        // 26 features from the smoothed joints (pixel space).
         var pixelJoints: [String: SIMD2<Double>] = [:]
         for (name, point) in smoothedJoints {
             pixelJoints[name] = SIMD2(Double(point.x) * width, Double(point.y) * height)
         }
-        let values = PoseFeatures.compute(PoseFeatures.normalise(pixelJoints))
-        resampler.push(FrameFeatures(timestamp: timestamp, values: values))
+        let features = PoseFeatures.features(fromPixelJoints: pixelJoints,
+                                             imageWidth: width, imageHeight: height, timestamp: timestamp)
 
-        // (5) Warm-up until a full window exists.
-        if firstTimestamp == nil {
-            firstTimestamp = timestamp
-            nextPrediction = timestamp + resampler.windowSeconds
-        }
-        let calibrating = !resampler.isReady()
+        var calibrating = true
+        if let resampler {
+            resampler.push(features)
+            if firstTimestamp == nil {
+                firstTimestamp = timestamp
+                nextPrediction = timestamp + resampler.windowSeconds
+            }
+            calibrating = !resampler.isReady()
 
-        // Classification on a fixed stride, with coverage + confidence + vote smoothing.
-        if timestamp >= nextPrediction, resampler.isReady(), let classifier {
-            nextPrediction += predictionStride
-            if let window = resampler.window(), window.coverage >= minCoverage,
-               let prediction = try? classifier.predict(window), prediction.confidence >= minConfidence {
-                let stable = smoother.push(prediction.label)
-                currentRawLabel = stable
-                currentConfidence = prediction.confidence
-                counter.setExercise(stable)
+            if timestamp >= nextPrediction, resampler.isReady(), let classifier {
+                nextPrediction += predictionStride
+                if let window = resampler.window(), window.coverage >= minCoverage,
+                   let prediction = try? classifier.predict(window) {
+                    // Commit the best-guess label every stride (like the batch path's majority vote);
+                    // the LabelSmoother stabilises it. A hard confidence gate here just left
+                    // lower-confidence classes (push-up/squat) with no label at all.
+                    let stable = smoother.push(prediction.label)
+                    currentRawLabel = stable
+                    currentConfidence = prediction.confidence
+                    counter.setExercise(stable)
+                }
             }
         }
 
-        // Geometric rep counting every frame once we know the exercise.
-        if let exercise = currentRawLabel {
-            counter.update(angle: GeometricRepCounter.repAngle(for: exercise, frame: pose, orientedSize: orientedSize))
+        // Geometric rep counting every frame once we know the exercise (no-op for standing/walking).
+        if currentRawLabel != nil {
+            counter.update(pose: pose, orientedSize: orientedSize)
         }
 
-        let update = LiveUpdate(
+        return LiveUpdate(
             pose: pose,
             orientedSize: orientedSize,
             rawLabel: currentRawLabel,
@@ -175,7 +209,6 @@ nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSa
             reps: counter.reps,
             calibrating: calibrating
         )
-        onUpdate?(update)
     }
 
     // MARK: - Helpers
@@ -191,8 +224,8 @@ nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSa
         return result
     }
 
-    /// Exponential moving average per joint; joints missing this frame are dropped (so the
-    /// resampler masks them, matching training), but their last value is retained for reuse.
+    /// Per-joint EMA; joints missing this frame are dropped (so the resampler masks them,
+    /// matching training) but their last value is retained for reuse.
     private func smoothKeypoints(_ current: [String: CGPoint]) -> [String: CGPoint] {
         var out: [String: CGPoint] = [:]
         for (name, point) in current {

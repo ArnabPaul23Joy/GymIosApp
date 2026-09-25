@@ -1,89 +1,95 @@
 // GeometricRepCounter.swift
 // Counts repetitions purely from body-point geometry — no ML inference.
 //
-// For each exercise we track one joint angle that swings through a large arc once per rep:
-//   • squat   → knee angle   (hip → knee → ankle)
-//   • push-up → elbow angle  (shoulder → elbow → wrist)
-//   • pull-up → elbow angle  (shoulder → elbow → wrist)
+// Each exercise maps to a 1-D "rep signal" that swings through a large arc once per rep:
+//   • squat / squat-shoulder-press → knee angle    (hip → knee → ankle)
+//   • push-up / pull-up            → elbow angle   (shoulder → elbow → wrist)
+//   • hanging leg raise            → hip angle      (shoulder → hip → knee), torso↔legs closing
+//   • skipping                     → hip vertical position (body bobs once per jump)
+//   • standing / walking / unknown → no signal → count stays 0
 //
-// The per-frame angle forms a 1-D signal. We smooth it, then count full
-// flexion→extension cycles with a Schmitt trigger whose thresholds are derived from
-// the observed range of motion (hysteresis rejects jitter). Angles are computed in
-// oriented pixel space so aspect ratio doesn't distort them.
+// We smooth the signal, then count full cycles with a Schmitt trigger whose thresholds are
+// derived from the observed range of motion (hysteresis rejects jitter). Angles are computed
+// in oriented pixel space so aspect ratio doesn't distort them.
 
 import CoreGraphics
 import Foundation
 
+/// How to derive one exercise's rep signal, and how big a swing counts as a real rep.
+nonisolated struct RepSignalSpec {
+    let compute: @Sendable (PoseFrame, CGSize) -> Double?
+    let minRange: Double
+}
+
 nonisolated enum GeometricRepCounter {
 
-    /// Minimum peak-to-trough swing (degrees) required to accept the motion as real reps.
-    private static let minRangeDegrees = 30.0
     /// Fraction of the range used as hysteresis margin on each side of the midpoint.
-    private static let hysteresis = 0.30
-    /// Moving-average half-window (frames) used to smooth the raw angle signal.
+    static let hysteresis = 0.30
+    /// Moving-average half-window (frames) used to smooth the raw signal.
     private static let smoothingRadius = 2
 
+    /// nil for exercises that shouldn't be counted (standing / walking / unrecognised).
+    static func spec(for exercise: String) -> RepSignalSpec? {
+        switch exercise {
+        case "squat", "squatpress":
+            return RepSignalSpec(compute: { f, s in
+                avgAngle(f, s, ("left_hip", "left_knee", "left_ankle"), ("right_hip", "right_knee", "right_ankle"))
+            }, minRange: 30)
+        case "pushup", "pullup":
+            return RepSignalSpec(compute: { f, s in
+                avgAngle(f, s, ("left_shoulder", "left_elbow", "left_wrist"), ("right_shoulder", "right_elbow", "right_wrist"))
+            }, minRange: 30)
+        case "legraise":
+            return RepSignalSpec(compute: { f, s in
+                avgAngle(f, s, ("left_shoulder", "left_hip", "left_knee"), ("right_shoulder", "right_hip", "right_knee"))
+            }, minRange: 35)
+        case "skipping":
+            return RepSignalSpec(compute: { f, _ in hipVertical(f) }, minRange: 3.0)
+        default:
+            return nil
+        }
+    }
+
     static func countReps(poses: [PoseFrame], orientedSize: CGSize, exercise: String) -> Int {
-        guard !poses.isEmpty else { return 0 }
-        let w = Double(orientedSize.width), h = Double(orientedSize.height)
+        guard !poses.isEmpty, let spec = spec(for: exercise) else { return 0 }
 
-        // 1. Raw per-frame angle (NaN where the needed joints weren't seen).
-        let raw = poses.map { angleSignal(for: exercise, frame: $0, width: w, height: h) }
-
-        // 2. Fill gaps by linear interpolation, then trim leading/trailing gaps.
+        // 1. Raw per-frame signal (NaN where the needed joints weren't seen).
+        let raw = poses.map { spec.compute($0, orientedSize) ?? .nan }
+        // 2. Fill gaps by linear interpolation.
         guard let filled = interpolateGaps(raw) else { return 0 }
-
         // 3. Smooth to suppress detector jitter.
         let signal = smooth(filled, radius: smoothingRadius)
-
         // 4. Adaptive thresholds from the range of motion.
         guard let mn = signal.min(), let mx = signal.max() else { return 0 }
         let range = mx - mn
-        guard range >= minRangeDegrees else { return 0 }
+        guard range >= spec.minRange else { return 0 }
         let low = mn + hysteresis * range
         let high = mx - hysteresis * range
-
         // 5. Schmitt trigger: one rep per extended → flexed → extended cycle.
         return countCycles(signal, low: low, high: high)
     }
 
-    // MARK: - Per-exercise angle
+    // MARK: - Rep signals
 
-    /// The rep-tracking joint angle (degrees) for one frame, or nil if the needed joints
-    /// weren't seen. Shared by the batch counter and the live `StreamingRepCounter`.
-    static func repAngle(for exercise: String, frame: PoseFrame, orientedSize: CGSize) -> Double? {
-        let v = angleSignal(for: exercise, frame: frame,
-                            width: Double(orientedSize.width), height: Double(orientedSize.height))
-        return v.isNaN ? nil : v
-    }
-
-    private static func angleSignal(for exercise: String, frame: PoseFrame, width: Double, height: Double) -> Double {
-        switch exercise {
-        case "squat":
-            return averageAngle(frame, width: width, height: height,
-                                 left: ("left_hip", "left_knee", "left_ankle"),
-                                 right: ("right_hip", "right_knee", "right_ankle"))
-        case "pushup", "pullup":
-            return averageAngle(frame, width: width, height: height,
-                                 left: ("left_shoulder", "left_elbow", "left_wrist"),
-                                 right: ("right_shoulder", "right_elbow", "right_wrist"))
-        default:
-            return .nan
-        }
-    }
-
-    /// Angle at joint `b` (vertex) for the a-b-c chain, averaged over whichever sides are visible.
-    private static func averageAngle(_ frame: PoseFrame, width: Double, height: Double,
-                                     left: (String, String, String),
-                                     right: (String, String, String)) -> Double {
-        let l = jointAngle(frame, left, width: width, height: height)
-        let r = jointAngle(frame, right, width: width, height: height)
+    /// Angle at joint `b` (vertex) for the a-b-c chain, averaged over visible sides; nil if neither seen.
+    private static func avgAngle(_ frame: PoseFrame, _ size: CGSize,
+                                 _ left: (String, String, String),
+                                 _ right: (String, String, String)) -> Double? {
+        let w = Double(size.width), h = Double(size.height)
+        let l = jointAngle(frame, left, width: w, height: h)
+        let r = jointAngle(frame, right, width: w, height: h)
         switch (l, r) {
         case let (l?, r?): return (l + r) / 2
         case let (l?, nil): return l
         case let (nil, r?): return r
-        default:           return .nan
+        default:           return nil
         }
+    }
+
+    /// Body vertical position as a % of frame height (hip centre, top-left origin) — for skipping.
+    private static func hipVertical(_ frame: PoseFrame) -> Double? {
+        guard let l = frame.joints["left_hip"], let r = frame.joints["right_hip"] else { return nil }
+        return Double(l.y + r.y) / 2 * 100
     }
 
     private static func jointAngle(_ frame: PoseFrame, _ names: (String, String, String),
@@ -110,11 +116,9 @@ nonisolated enum GeometricRepCounter {
         guard valid.count >= 2 else { return nil }
 
         var out = values
-        // Clamp the ends to the nearest valid sample.
         let first = valid.first!, last = valid.last!
         for i in 0..<first.offset { out[i] = first.element }
         for i in (last.offset + 1)..<out.count { out[i] = last.element }
-        // Interpolate interior gaps.
         for k in 0..<(valid.count - 1) {
             let (i0, v0) = valid[k], (i1, v1) = valid[k + 1]
             guard i1 > i0 + 1 else { continue }
@@ -138,13 +142,12 @@ nonisolated enum GeometricRepCounter {
 
     private static func countCycles(_ signal: [Double], low: Double, high: Double) -> Int {
         var reps = 0
-        // Start in whichever half the first sample sits, so a partial opening rep isn't miscounted.
         var extended = signal[0] >= (low + high) / 2
         for v in signal {
             if extended, v < low {
-                extended = false            // entered the flexed/contracted phase
+                extended = false
             } else if !extended, v > high {
-                reps += 1                   // returned to extended → one full rep
+                reps += 1
                 extended = true
             }
         }

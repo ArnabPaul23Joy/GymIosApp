@@ -8,12 +8,16 @@ struct ContentView: View {
     @State private var videoURL: URL?
     @State private var player: AVPlayer?
     @State private var showLiveCamera = false
+    @State private var liveGalleryPicker: PhotosPickerItem?
+    @State private var liveGalleryURL: URL?
+    @State private var showLiveGallery = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     liveCameraButton
+                    liveGalleryButton
                     videoPickerCard
                     if videoURL != nil {
                         exerciseTypeCard
@@ -28,6 +32,20 @@ struct ContentView: View {
         }
         .fullScreenCover(isPresented: $showLiveCamera) {
             LiveWorkoutView()
+        }
+        .fullScreenCover(isPresented: $showLiveGallery) {
+            if let liveGalleryURL {
+                LiveVideoWorkoutView(url: liveGalleryURL)
+            }
+        }
+        .onChange(of: liveGalleryPicker) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                guard let vid = try? await newItem.loadTransferable(type: VideoFile.self) else { return }
+                liveGalleryURL = vid.url
+                showLiveGallery = true
+                liveGalleryPicker = nil
+            }
         }
         .onChange(of: pickerItem) { _, newItem in
             guard let newItem else { return }
@@ -55,6 +73,31 @@ struct ContentView: View {
                     Text("Live Camera")
                         .fontWeight(.semibold)
                     Text("Count reps in real time")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Live from Gallery Button
+
+    private var liveGalleryButton: some View {
+        PhotosPicker(selection: $liveGalleryPicker, matching: .videos, photoLibrary: .shared()) {
+            HStack(spacing: 10) {
+                Image(systemName: "play.rectangle.on.rectangle")
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Live from Gallery")
+                        .fontWeight(.semibold)
+                    Text("Stream a saved video, counted live")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
