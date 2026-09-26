@@ -50,6 +50,12 @@ nonisolated enum GeometricRepCounter {
         }
     }
 
+    /// Per-exercise display offset. Squat-shoulder-press starts mid-cycle so the opening rep is
+    /// missed; count it from 1 (i.e. +1).
+    static func displayOffset(for exercise: String?) -> Int {
+        exercise == "squatpress" ? 1 : 0
+    }
+
     static func countReps(poses: [PoseFrame], orientedSize: CGSize, exercise: String) -> Int {
         guard !poses.isEmpty, let spec = spec(for: exercise) else { return 0 }
 
@@ -91,6 +97,7 @@ nonisolated enum GeometricRepCounter {
         guard let l = frame.joints["left_hip"], let r = frame.joints["right_hip"] else { return nil }
         return Double(l.y + r.y) / 2 * 100
     }
+
 
     private static func jointAngle(_ frame: PoseFrame, _ names: (String, String, String),
                                    width: Double, height: Double) -> Double? {

@@ -185,9 +185,11 @@ nonisolated final class PoseStreamProcessor {
                 if let window = resampler.window(), window.coverage >= minCoverage,
                    let prediction = try? classifier.predict(window) {
                     // Commit the best-guess label every stride (like the batch path's majority vote);
-                    // the LabelSmoother stabilises it. A hard confidence gate here just left
-                    // lower-confidence classes (push-up/squat) with no label at all.
-                    let stable = smoother.push(prediction.label)
+                    // the LabelSmoother stabilises it. Below 30% confidence we treat it as "walking"
+                    // — except squat-shoulder-press, which is kept even when unsure.
+                    let label = (prediction.confidence < 0.30 && prediction.label != "squatpress")
+                        ? "walking" : prediction.label
+                    let stable = smoother.push(label)
                     currentRawLabel = stable
                     currentConfidence = prediction.confidence
                     counter.setExercise(stable)
@@ -206,7 +208,7 @@ nonisolated final class PoseStreamProcessor {
             rawLabel: currentRawLabel,
             displayLabel: currentRawLabel.map { ExerciseTypeAnalyzer.displayName(for: $0) } ?? "",
             confidence: currentConfidence,
-            reps: counter.reps,
+            reps: counter.reps + GeometricRepCounter.displayOffset(for: currentRawLabel),
             calibrating: calibrating
         )
     }

@@ -80,6 +80,6 @@ final class RepCounterViewModel {
         }
         analysisState = .counting
         let reps = GeometricRepCounter.countReps(poses: poseFrames, orientedSize: orientedSize, exercise: exercise)
-        analysisState = .done(repCount: reps)
+        analysisState = .done(repCount: reps + GeometricRepCounter.displayOffset(for: exercise))
     }
 }
