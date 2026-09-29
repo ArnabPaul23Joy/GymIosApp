@@ -8,8 +8,12 @@ struct LiveVideoWorkoutView: View {
     @State private var viewModel: LiveVideoWorkoutViewModel
     @Environment(\.dismiss) private var dismiss
 
-    init(url: URL) {
+    /// Called when the user taps "Generate Report" — hands back the per-exercise report rows.
+    let onGenerateReport: ([ExerciseCount]) -> Void
+
+    init(url: URL, onGenerateReport: @escaping ([ExerciseCount]) -> Void) {
         _viewModel = State(initialValue: LiveVideoWorkoutViewModel(url: url))
+        self.onGenerateReport = onGenerateReport
     }
 
     var body: some View {
@@ -36,9 +40,25 @@ struct LiveVideoWorkoutView: View {
             } else if viewModel.finished {
                 banner("Finished", systemImage: "checkmark.circle")
             }
+            generateReportButton
             repCountBar
         }
         .padding()
+    }
+
+    private var generateReportButton: some View {
+        Button {
+            viewModel.stop()
+            onGenerateReport(WorkoutReport.items(from: viewModel.repTotals))
+        } label: {
+            Label("Generate Report", systemImage: "doc.text.magnifyingglass")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(.tint, in: RoundedRectangle(cornerRadius: 14))
+        }
+        .padding(.bottom, 8)
     }
 
     private var topBar: some View {

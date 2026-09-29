@@ -20,6 +20,8 @@ final class LiveVideoWorkoutViewModel {
     var reps = 0
     var calibrating = true
     var finished = false
+    /// Cumulative raw reps per exercise this session, for the report.
+    var repTotals: [String: Int] = [:]
 
     init(url: URL) {
         self.url = url
@@ -48,6 +50,7 @@ final class LiveVideoWorkoutViewModel {
         finished = false
         currentFrame = nil
         latestPose = nil
+        repTotals = [:]
         engine.start(url: url)
     }
 
@@ -59,5 +62,10 @@ final class LiveVideoWorkoutViewModel {
         confidence = update.update.confidence
         reps = update.update.reps
         calibrating = update.update.calibrating
+        // Keep the peak per exercise (totals are cumulative/monotonic by design) so no stale or
+        // out-of-order update can ever wipe the tally the report relies on.
+        for (exercise, count) in update.update.repTotals {
+            repTotals[exercise] = max(repTotals[exercise] ?? 0, count)
+        }
     }
 }

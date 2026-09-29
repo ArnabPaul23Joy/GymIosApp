@@ -11,6 +11,8 @@ struct ContentView: View {
     @State private var liveGalleryPicker: PhotosPickerItem?
     @State private var liveGalleryURL: URL?
     @State private var showLiveGallery = false
+    @State private var reportItems: [ExerciseCount] = []
+    @State private var showReport = false   // true once "Generate Report" is tapped
 
     var body: some View {
         NavigationStack {
@@ -19,6 +21,9 @@ struct ContentView: View {
                     liveCameraButton
                     liveGalleryButton
                     videoPickerCard
+                    if showReport {
+                        reportCard
+                    }
                     if videoURL != nil {
                         exerciseTypeCard
                         analyzeButton
@@ -35,7 +40,12 @@ struct ContentView: View {
         }
         .fullScreenCover(isPresented: $showLiveGallery) {
             if let liveGalleryURL {
-                LiveVideoWorkoutView(url: liveGalleryURL)
+                LiveVideoWorkoutView(url: liveGalleryURL) { items in
+                    // Show the report inline on this main screen, then dismiss the player.
+                    reportItems = items
+                    showReport = true
+                    showLiveGallery = false
+                }
             }
         }
         .onChange(of: liveGalleryPicker) { _, newItem in
@@ -43,6 +53,7 @@ struct ContentView: View {
             Task {
                 guard let vid = try? await newItem.loadTransferable(type: VideoFile.self) else { return }
                 liveGalleryURL = vid.url
+                showReport = false          // clear any previous report when starting a new session
                 showLiveGallery = true
                 liveGalleryPicker = nil
             }
@@ -58,6 +69,44 @@ struct ContentView: View {
                 await viewModel.analyzeUpload(url: vid.url)
             }
         }
+    }
+
+    // MARK: - Workout Report Card
+
+    private var reportCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Workout Report", systemImage: "doc.text.magnifyingglass")
+                    .font(.headline)
+                Spacer()
+                Button { showReport = false } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if reportItems.isEmpty {
+                Text("No reps counted.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(reportItems) { item in
+                    HStack {
+                        Label(item.name, systemImage: "figure.strengthtraining.traditional")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(item.count)")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.tint)
+                            .monospacedDigit()
+                    }
+                    if item.id != reportItems.last?.id { Divider() }
+                }
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     // MARK: - Live Camera Button

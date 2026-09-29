@@ -33,6 +33,7 @@ struct LiveUpdate: Sendable {
     var confidence: Double
     var reps: Int
     var calibrating: Bool
+    var repTotals: [String: Int]  // cumulative raw reps per exercise this session (for the report)
 }
 
 nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
@@ -123,6 +124,7 @@ nonisolated final class PoseStreamProcessor {
     private var firstTimestamp: Double?
     private var currentRawLabel: String?
     private var currentConfidence = 0.0
+    private var exerciseTotals: [String: Int] = [:]   // committed reps from finished segments
 
     init() {
         if let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
@@ -141,7 +143,15 @@ nonisolated final class PoseStreamProcessor {
         firstTimestamp = nil
         currentRawLabel = nil
         currentConfidence = 0
+        exerciseTotals = [:]
         counter.reset()
+    }
+
+    /// Cumulative raw reps per exercise: committed finished segments plus the in-progress one.
+    private func repTotals() -> [String: Int] {
+        var totals = exerciseTotals
+        if let current = currentRawLabel { totals[current, default: 0] += counter.reps }
+        return totals
     }
 
     /// Reset just the rep tally (keeps the current label/history).
@@ -190,8 +200,12 @@ nonisolated final class PoseStreamProcessor {
                     let label = (prediction.confidence < 0.30 && prediction.label != "squatpress")
                         ? "walking" : prediction.label
                     let stable = smoother.push(label)
-                    currentRawLabel = stable
                     currentConfidence = prediction.confidence
+                    if stable != currentRawLabel {
+                        // Commit the finished segment's reps before the counter resets for the new exercise.
+                        if let previous = currentRawLabel { exerciseTotals[previous, default: 0] += counter.reps }
+                        currentRawLabel = stable
+                    }
                     counter.setExercise(stable)
                 }
             }
@@ -209,7 +223,8 @@ nonisolated final class PoseStreamProcessor {
             displayLabel: currentRawLabel.map { ExerciseTypeAnalyzer.displayName(for: $0) } ?? "",
             confidence: currentConfidence,
             reps: counter.reps + GeometricRepCounter.displayOffset(for: currentRawLabel),
-            calibrating: calibrating
+            calibrating: calibrating,
+            repTotals: repTotals()
         )
     }
 
