@@ -18,17 +18,19 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    liveCameraButton
-                    liveGalleryButton
-                    videoPickerCard
                     if showReport {
+                        // Report takes over the screen; the cancel (✕) restores the buttons/views.
                         reportCard
+                    } else {
+                        liveCameraButton
+                        liveGalleryButton
+                        videoPickerCard
+                        if videoURL != nil {
+                            exerciseTypeCard
+                            analyzeButton
+                        }
+                        analysisResultCard
                     }
-                    if videoURL != nil {
-                        exerciseTypeCard
-                        analyzeButton
-                    }
-                    analysisResultCard
                 }
                 .padding()
             }
@@ -91,22 +93,44 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(reportItems) { item in
-                    HStack {
-                        Label(item.name, systemImage: "figure.strengthtraining.traditional")
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Text("\(item.count)")
-                            .font(.title3.weight(.bold))
+                    HStack(spacing: 12) {
+                        Image(systemName: "figure.strengthtraining.traditional")
                             .foregroundStyle(.tint)
-                            .monospacedDigit()
+                            .frame(width: 26)
+                        Text(item.name)
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("\(item.count) reps")
+                                .font(.subheadline.weight(.semibold))
+                                .monospacedDigit()
+                            Text(caloriesString(item.calories) + " kcal · " + WorkoutReport.durationString(item.duration))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
                     }
-                    if item.id != reportItems.last?.id { Divider() }
+                    Divider()
+                }
+
+                HStack {
+                    Text("Total calories burnt")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(caloriesString(WorkoutReport.totalCalories(reportItems)) + " kcal")
+                        .font(.headline)
+                        .foregroundStyle(.tint)
+                        .monospacedDigit()
                 }
             }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Trims trailing ".0" so whole numbers read cleanly (e.g. "5" not "5.0", but "2.5" stays).
+    private func caloriesString(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
     }
 
     // MARK: - Live Camera Button

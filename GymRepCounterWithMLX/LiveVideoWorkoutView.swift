@@ -49,7 +49,7 @@ struct LiveVideoWorkoutView: View {
     private var generateReportButton: some View {
         Button {
             viewModel.stop()
-            onGenerateReport(WorkoutReport.items(from: viewModel.repTotals))
+            onGenerateReport(WorkoutReport.items(from: viewModel.repTotals, durations: viewModel.repDurations))
         } label: {
             Label("Generate Report", systemImage: "doc.text.magnifyingglass")
                 .font(.subheadline.weight(.semibold))

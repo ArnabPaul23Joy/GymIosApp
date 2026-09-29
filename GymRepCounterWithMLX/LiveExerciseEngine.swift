@@ -33,7 +33,8 @@ struct LiveUpdate: Sendable {
     var confidence: Double
     var reps: Int
     var calibrating: Bool
-    var repTotals: [String: Int]  // cumulative raw reps per exercise this session (for the report)
+    var repTotals: [String: Int]        // cumulative raw reps per exercise this session
+    var repDurations: [String: Double]  // cumulative active seconds per exercise (for the report)
 }
 
 nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
@@ -124,7 +125,9 @@ nonisolated final class PoseStreamProcessor {
     private var firstTimestamp: Double?
     private var currentRawLabel: String?
     private var currentConfidence = 0.0
-    private var exerciseTotals: [String: Int] = [:]   // committed reps from finished segments
+    private var exerciseTotals: [String: Int] = [:]      // committed reps from finished segments
+    private var exerciseDurations: [String: Double] = [:] // cumulative active seconds per exercise
+    private var previousTimestamp: Double?                 // for per-frame duration deltas
 
     init() {
         if let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
@@ -144,6 +147,8 @@ nonisolated final class PoseStreamProcessor {
         currentRawLabel = nil
         currentConfidence = 0
         exerciseTotals = [:]
+        exerciseDurations = [:]
+        previousTimestamp = nil
         counter.reset()
     }
 
@@ -216,6 +221,13 @@ nonisolated final class PoseStreamProcessor {
             counter.update(pose: pose, orientedSize: orientedSize)
         }
 
+        // Accrue this frame's elapsed time to the current exercise (label change = clock start/stop).
+        if let previous = previousTimestamp, let current = currentRawLabel {
+            let dt = timestamp - previous
+            if dt > 0, dt < 1.0 { exerciseDurations[current, default: 0] += dt }  // ignore seeks/gaps
+        }
+        previousTimestamp = timestamp
+
         return LiveUpdate(
             pose: pose,
             orientedSize: orientedSize,
@@ -224,7 +236,8 @@ nonisolated final class PoseStreamProcessor {
             confidence: currentConfidence,
             reps: counter.reps + GeometricRepCounter.displayOffset(for: currentRawLabel),
             calibrating: calibrating,
-            repTotals: repTotals()
+            repTotals: repTotals(),
+            repDurations: exerciseDurations
         )
     }
 

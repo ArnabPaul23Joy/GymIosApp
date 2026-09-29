@@ -22,6 +22,8 @@ final class LiveVideoWorkoutViewModel {
     var finished = false
     /// Cumulative raw reps per exercise this session, for the report.
     var repTotals: [String: Int] = [:]
+    /// Cumulative active seconds per exercise this session, for the report.
+    var repDurations: [String: Double] = [:]
 
     init(url: URL) {
         self.url = url
@@ -51,6 +53,7 @@ final class LiveVideoWorkoutViewModel {
         currentFrame = nil
         latestPose = nil
         repTotals = [:]
+        repDurations = [:]
         engine.start(url: url)
     }
 
@@ -66,6 +69,9 @@ final class LiveVideoWorkoutViewModel {
         // out-of-order update can ever wipe the tally the report relies on.
         for (exercise, count) in update.update.repTotals {
             repTotals[exercise] = max(repTotals[exercise] ?? 0, count)
+        }
+        for (exercise, seconds) in update.update.repDurations {
+            repDurations[exercise] = max(repDurations[exercise] ?? 0, seconds)
         }
     }
 }
