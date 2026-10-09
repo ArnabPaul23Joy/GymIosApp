@@ -41,7 +41,13 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .fullScreenCover(isPresented: $showLiveCamera) {
-            LiveWorkoutView()
+            // Collect the body profile first, then run the live-camera workout.
+            LiveCameraFlow(profile: $bodyProfile) { items, reps in
+                reportItems = items
+                reportReps = reps
+                showReport = true
+                showLiveCamera = false
+            }
         }
         .fullScreenCover(isPresented: $showLiveGallery) {
             if let liveGalleryURL {
@@ -426,6 +432,23 @@ private struct LiveGalleryFlow: View {
     var body: some View {
         if started {
             LiveVideoWorkoutView(url: url, profile: profile, onGenerateReport: onGenerateReport)
+        } else {
+            WorkoutSetupView(profile: $profile) { started = true }
+        }
+    }
+}
+
+/// Shows the body-profile setup form first, then the live-camera workout screen once the user taps
+/// "Start".
+private struct LiveCameraFlow: View {
+    @Binding var profile: UserBodyProfile
+    let onGenerateReport: ([ExerciseCount], [RepRecord]) -> Void
+
+    @State private var started = false
+
+    var body: some View {
+        if started {
+            LiveWorkoutView(profile: profile, onGenerateReport: onGenerateReport)
         } else {
             WorkoutSetupView(profile: $profile) { started = true }
         }

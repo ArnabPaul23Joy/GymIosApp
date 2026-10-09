@@ -8,6 +8,17 @@ struct LiveWorkoutView: View {
     @State private var viewModel = LiveWorkoutViewModel()
     @Environment(\.dismiss) private var dismiss
 
+    /// Body metrics used to personalise the calorie estimate in the generated report.
+    let profile: UserBodyProfile
+    /// Called when the user taps "Finish" — hands back the per-exercise rows and the per-rep timeline.
+    let onGenerateReport: ([ExerciseCount], [RepRecord]) -> Void
+
+    init(profile: UserBodyProfile,
+         onGenerateReport: @escaping ([ExerciseCount], [RepRecord]) -> Void) {
+        self.profile = profile
+        self.onGenerateReport = onGenerateReport
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -34,13 +45,97 @@ struct LiveWorkoutView: View {
     private var hud: some View {
         VStack(spacing: 0) {
             topBar
+            // Rep log on the left, elapsed-time pill on the right.
+            HStack(alignment: .top) {
+                if !loggedExercises.isEmpty { exerciseLog }
+                Spacer()
+                timerPill
+            }
+            .padding(.top, 10)
             Spacer()
             if viewModel.calibrating {
                 calibratingBanner
             }
+            generateReportButton
             repCountBar
         }
         .padding()
+        // A gentle tap on every counted rep, so reps register without watching the screen.
+        .sensoryFeedback(.increase, trigger: viewModel.repRecords.count)
+    }
+
+    // MARK: - Elapsed-time pill
+
+    private var timerPill: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = viewModel.sessionStart.map { max(0, context.date.timeIntervalSince($0)) } ?? 0
+            Label(elapsedString(elapsed), systemImage: "stopwatch")
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(.black.opacity(0.5), in: Capsule())
+        }
+    }
+
+    private func elapsedString(_ seconds: TimeInterval) -> String {
+        let t = Int(seconds)
+        return String(format: "%02d:%02d", t / 60, t % 60)
+    }
+
+    // MARK: - Per-exercise rep count log (overlay)
+
+    /// Each tracked exercise detected so far, with its running rep count (display offset applied),
+    /// in the report's display order.
+    private var loggedExercises: [(raw: String, name: String, count: Int)] {
+        WorkoutReport.tracked.compactMap { raw in
+            guard let rawCount = viewModel.repTotals[raw] else { return nil }
+            let count = rawCount + GeometricRepCounter.displayOffset(for: raw)
+            guard count > 0 else { return nil }
+            return (raw, ExerciseTypeAnalyzer.displayName(for: raw), count)
+        }
+    }
+
+    private var exerciseLog: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Rep Log")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            ForEach(loggedExercises, id: \.raw) { entry in
+                HStack(spacing: 10) {
+                    Text(entry.name)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white)
+                    Spacer(minLength: 12)
+                    Text("\(entry.count)")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: - Finish / Generate Report
+
+    private var generateReportButton: some View {
+        Button {
+            viewModel.stop()
+            onGenerateReport(
+                WorkoutReport.items(from: viewModel.repTotals, durations: viewModel.repDurations,
+                                    profile: profile),
+                viewModel.repRecords
+            )
+        } label: {
+            Label("Finish & Generate Report", systemImage: "doc.text.magnifyingglass")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(.tint, in: RoundedRectangle(cornerRadius: 14))
+        }
+        .padding(.bottom, 8)
     }
 
     private var topBar: some View {

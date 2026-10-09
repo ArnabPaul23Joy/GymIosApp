@@ -99,6 +99,10 @@ nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSa
 
     func resetCounter() { sampleQueue.async { [self] in processor.resetCounter() } }
 
+    /// Full reset of the streaming pipeline — clears the rep tally AND the session accumulators
+    /// (per-exercise totals, durations, and per-rep records) that feed the report.
+    func resetSession() { sampleQueue.async { [self] in processor.reset() } }
+
     // MARK: - Per-frame (runs on sampleQueue)
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
