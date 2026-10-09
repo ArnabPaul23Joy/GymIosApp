@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var liveGalleryURL: URL?
     @State private var showLiveGallery = false
     @State private var reportItems: [ExerciseCount] = []
+    @State private var reportSegments: [SegmentRecord] = []
     @State private var showReport = false   // true once "Generate Report" is tapped
 
     var body: some View {
@@ -42,9 +43,10 @@ struct ContentView: View {
         }
         .fullScreenCover(isPresented: $showLiveGallery) {
             if let liveGalleryURL {
-                LiveVideoWorkoutView(url: liveGalleryURL) { items in
+                LiveVideoWorkoutView(url: liveGalleryURL) { items, segments in
                     // Show the report inline on this main screen, then dismiss the player.
                     reportItems = items
+                    reportSegments = segments
                     showReport = true
                     showLiveGallery = false
                 }
@@ -120,6 +122,27 @@ struct ContentView: View {
                         .font(.headline)
                         .foregroundStyle(.tint)
                         .monospacedDigit()
+                }
+
+                let trackedSet = Set(WorkoutReport.tracked)
+                let trackedSegments = reportSegments.filter { trackedSet.contains($0.rawLabel) }
+                if !trackedSegments.isEmpty {
+                    Divider()
+                    Text("Timeline")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(trackedSegments) { seg in
+                        HStack(spacing: 8) {
+                            Text(WorkoutReport.durationString(seg.start) + " – " + WorkoutReport.durationString(seg.end))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .frame(minWidth: 90, alignment: .leading)
+                            Text(ExerciseTypeAnalyzer.displayName(for: seg.rawLabel))
+                                .font(.caption2.weight(.medium))
+                            Spacer()
+                        }
+                    }
                 }
             }
         }

@@ -8,10 +8,10 @@ struct LiveVideoWorkoutView: View {
     @State private var viewModel: LiveVideoWorkoutViewModel
     @Environment(\.dismiss) private var dismiss
 
-    /// Called when the user taps "Generate Report" — hands back the per-exercise report rows.
-    let onGenerateReport: ([ExerciseCount]) -> Void
+    /// Called when the user taps "Generate Report" — hands back the per-exercise rows and timeline segments.
+    let onGenerateReport: ([ExerciseCount], [SegmentRecord]) -> Void
 
-    init(url: URL, onGenerateReport: @escaping ([ExerciseCount]) -> Void) {
+    init(url: URL, onGenerateReport: @escaping ([ExerciseCount], [SegmentRecord]) -> Void) {
         _viewModel = State(initialValue: LiveVideoWorkoutViewModel(url: url))
         self.onGenerateReport = onGenerateReport
     }
@@ -49,7 +49,10 @@ struct LiveVideoWorkoutView: View {
     private var generateReportButton: some View {
         Button {
             viewModel.stop()
-            onGenerateReport(WorkoutReport.items(from: viewModel.repTotals, durations: viewModel.repDurations))
+            onGenerateReport(
+                WorkoutReport.items(from: viewModel.repTotals, durations: viewModel.repDurations),
+                viewModel.segments
+            )
         } label: {
             Label("Generate Report", systemImage: "doc.text.magnifyingglass")
                 .font(.subheadline.weight(.semibold))
@@ -123,15 +126,30 @@ struct LiveVideoWorkoutView: View {
                         .foregroundStyle(.white.opacity(0.8))
                 }
                 Spacer()
-                Button {
-                    viewModel.restart()
-                } label: {
-                    Label("Replay", systemImage: "arrow.counterclockwise")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .background(.white.opacity(0.18), in: Capsule())
+                // Cumulative total for the ongoing exercise across the whole video (all its segments).
+                if !viewModel.displayLabel.isEmpty {
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text("\(viewModel.totalRepsForCurrentExercise)")
+                            .font(.system(size: 64, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .contentTransition(.numericText())
+                            .animation(.spring(response: 0.35), value: viewModel.totalRepsForCurrentExercise)
+                        Text("total")
+                            .font(.headline)
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
                 }
+            }
+
+            Button {
+                viewModel.restart()
+            } label: {
+                Label("Replay", systemImage: "arrow.counterclockwise")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(.white.opacity(0.18), in: Capsule())
             }
         }
         .padding()

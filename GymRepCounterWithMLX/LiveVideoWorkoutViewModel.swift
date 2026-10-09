@@ -16,6 +16,8 @@ final class LiveVideoWorkoutViewModel {
     var latestPose: PoseFrame?
     var orientedSize: CGSize = .zero
     var displayLabel = ""
+    /// Raw classifier label of the ongoing exercise (key into repTotals); "" when none.
+    var currentRawLabel = ""
     var confidence = 0.0
     var reps = 0
     var calibrating = true
@@ -24,6 +26,16 @@ final class LiveVideoWorkoutViewModel {
     var repTotals: [String: Int] = [:]
     /// Cumulative active seconds per exercise this session, for the report.
     var repDurations: [String: Double] = [:]
+    /// Ordered exercise-type segments (time ranges) detected during playback, for the report.
+    var segments: [SegmentRecord] = []
+
+    /// Total reps counted across the whole video so far for the ongoing exercise (all its segments
+    /// combined), displayed with the same offset as the live count. 0 when no exercise is active.
+    var totalRepsForCurrentExercise: Int {
+        guard !currentRawLabel.isEmpty else { return 0 }
+        let raw = repTotals[currentRawLabel] ?? 0
+        return raw + GeometricRepCounter.displayOffset(for: currentRawLabel)
+    }
 
     init(url: URL) {
         self.url = url
@@ -47,6 +59,7 @@ final class LiveVideoWorkoutViewModel {
         engine.stop()
         reps = 0
         displayLabel = ""
+        currentRawLabel = ""
         confidence = 0
         calibrating = true
         finished = false
@@ -54,6 +67,7 @@ final class LiveVideoWorkoutViewModel {
         latestPose = nil
         repTotals = [:]
         repDurations = [:]
+        segments = []
         engine.start(url: url)
     }
 
@@ -62,6 +76,7 @@ final class LiveVideoWorkoutViewModel {
         latestPose = update.update.pose
         orientedSize = update.update.orientedSize
         displayLabel = update.update.displayLabel
+        currentRawLabel = update.update.rawLabel ?? ""
         confidence = update.update.confidence
         reps = update.update.reps
         calibrating = update.update.calibrating
@@ -72,6 +87,10 @@ final class LiveVideoWorkoutViewModel {
         }
         for (exercise, seconds) in update.update.repDurations {
             repDurations[exercise] = max(repDurations[exercise] ?? 0, seconds)
+        }
+        // Segments grow monotonically (only appended, never removed), so always take the latest.
+        if update.update.segments.count >= segments.count {
+            segments = update.update.segments
         }
     }
 }

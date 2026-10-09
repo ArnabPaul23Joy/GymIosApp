@@ -24,6 +24,14 @@ import Foundation
 import ImageIO
 import Vision
 
+/// A contiguous run of a single exercise type detected in the video timeline.
+struct SegmentRecord: Sendable, Identifiable {
+    let id = UUID()
+    let rawLabel: String
+    let start: Double   // video PTS (seconds) when this exercise segment began
+    let end: Double     // video PTS (seconds) when it ended (or current timestamp if still ongoing)
+}
+
 /// A snapshot pushed to the UI on every processed frame.
 struct LiveUpdate: Sendable {
     var pose: PoseFrame?
@@ -35,6 +43,7 @@ struct LiveUpdate: Sendable {
     var calibrating: Bool
     var repTotals: [String: Int]        // cumulative raw reps per exercise this session
     var repDurations: [String: Double]  // cumulative active seconds per exercise (for the report)
+    var segments: [SegmentRecord]       // ordered list of exercise segments seen so far
 }
 
 nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
@@ -128,6 +137,8 @@ nonisolated final class PoseStreamProcessor {
     private var exerciseTotals: [String: Int] = [:]      // committed reps from finished segments
     private var exerciseDurations: [String: Double] = [:] // cumulative active seconds per exercise
     private var previousTimestamp: Double?                 // for per-frame duration deltas
+    private var completedSegments: [SegmentRecord] = []   // finished exercise-type runs
+    private var segmentStartTimestamp: Double?             // PTS when the current segment began
 
     init() {
         if let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
@@ -149,6 +160,8 @@ nonisolated final class PoseStreamProcessor {
         exerciseTotals = [:]
         exerciseDurations = [:]
         previousTimestamp = nil
+        completedSegments = []
+        segmentStartTimestamp = nil
         counter.reset()
     }
 
@@ -208,8 +221,15 @@ nonisolated final class PoseStreamProcessor {
                     currentConfidence = prediction.confidence
                     if stable != currentRawLabel {
                         // Commit the finished segment's reps before the counter resets for the new exercise.
-                        if let previous = currentRawLabel { exerciseTotals[previous, default: 0] += counter.reps }
+                        if let previous = currentRawLabel {
+                            exerciseTotals[previous, default: 0] += counter.reps
+                            // Close the outgoing segment and record its time range.
+                            if let start = segmentStartTimestamp {
+                                completedSegments.append(SegmentRecord(rawLabel: previous, start: start, end: timestamp))
+                            }
+                        }
                         currentRawLabel = stable
+                        segmentStartTimestamp = timestamp
                     }
                     counter.setExercise(stable)
                 }
@@ -228,6 +248,12 @@ nonisolated final class PoseStreamProcessor {
         }
         previousTimestamp = timestamp
 
+        // Build the live segment list: completed runs + the still-open current one.
+        var liveSegments = completedSegments
+        if let current = currentRawLabel, let start = segmentStartTimestamp {
+            liveSegments.append(SegmentRecord(rawLabel: current, start: start, end: timestamp))
+        }
+
         return LiveUpdate(
             pose: pose,
             orientedSize: orientedSize,
@@ -237,7 +263,8 @@ nonisolated final class PoseStreamProcessor {
             reps: counter.reps + GeometricRepCounter.displayOffset(for: currentRawLabel),
             calibrating: calibrating,
             repTotals: repTotals(),
-            repDurations: exerciseDurations
+            repDurations: exerciseDurations,
+            segments: liveSegments
         )
     }
 
