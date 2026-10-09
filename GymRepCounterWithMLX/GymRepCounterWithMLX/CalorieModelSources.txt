@@ -1,0 +1,73 @@
+CALORIE MODEL — SOURCES & RATIONALE
+===================================
+
+This documents the research behind the per-rep calorie estimate used in the
+Workout Report (Live from Gallery). The model lives in ReportView.swift
+(WorkoutReport calorie section + UserBodyProfile).
+
+
+EQUATION
+--------
+Per exercise:
+
+    kcal(exercise) = reps × MET(exercise) × RMR(kcal/min) × repDuration(min)
+
+Personalised resting metabolic rate (Mifflin-St Jeor BMR), which brings
+weight, height and sex into the estimate:
+
+    RMR(kcal/min) = BMR_per_day / 1440
+    BMR_per_day   = 10·W(kg) + 6.25·H(cm) − 5·age + sexConstant
+                    sexConstant = +5 (male), −161 (female)
+                    age = 30 (fixed adult default; not collected from the user)
+
+Rationale: the standard ACSM/Compendium formula
+(kcal/min = MET × 3.5 × weight / 200) depends on weight alone. Replacing its
+fixed 3.5 ml/kg/min resting term with a personalised Mifflin-St Jeor RMR makes
+the result also depend on height and sex, as required.
+
+
+MET VALUES (2024 Compendium of Physical Activities)
+---------------------------------------------------
+    pushup      7.5   calisthenics, vigorous effort
+    pullup      8.0   calisthenics, vigorous (upper-body, demanding)
+    squat       5.0   resistance training, squats
+    skipping   11.0   rope skipping, general
+    legraise    6.5   body-weight resistance, high intensity (core)
+    squatpress  6.0   body-weight circuit / compound movement
+
+
+PER-REP TEMPO (approximate seconds per rep)
+-------------------------------------------
+    pushup 2.0 | pullup 3.0 | squat 3.0 | skipping 0.5 | legraise 3.0 | squatpress 3.5
+
+
+DEFAULTS (used when an input is left blank)
+-------------------------------------------
+    weight = 70 kg    (classic "reference man")
+    height = 170 cm   (≈ global adult average)
+    gender = male     (Mifflin-St Jeor +5 baseline)
+
+
+SOURCES
+-------
+2024 Adult Compendium of Physical Activities (MET values):
+    https://pacompendium.com/wp-content/uploads/2025/02/1_2024-adult-compendium_1_2024.pdf
+    https://pacompendium.com/conditioning-exercise/
+
+ACSM MET calorie formula (MET × 3.5 × weight / 200; ~5 kcal per litre O2):
+    https://www.calculator.net/calories-burned-calculator.html
+
+Mifflin-St Jeor BMR equation (weight, height, age, sex):
+    https://www.omnicalculator.com/health/bmr
+
+Average adult height / weight (NCD Risk Factor Collaboration / Our World in Data):
+    https://ourworldindata.org/human-height
+
+
+NOTES / APPROXIMATIONS
+----------------------
+- Age is not collected; fixed at 30.
+- Gender is a 2-option control (male/female); the default (male) applies when
+  the user does not change it.
+- MET values are population averages; per-rep tempos are assumptions. Results
+  are estimates, not measurements.

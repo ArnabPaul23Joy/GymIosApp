@@ -24,12 +24,15 @@ import Foundation
 import ImageIO
 import Vision
 
-/// A contiguous run of a single exercise type detected in the video timeline.
-struct SegmentRecord: Sendable, Identifiable {
+/// A single completed repetition, with the video time range over which it occurred. `index` is a
+/// 1-based number that runs continuously across the whole session (so exercise 2's first rep may be
+/// e.g. Rep 6). The range is bounded by the rep-counter variable incrementing.
+struct RepRecord: Sendable, Identifiable {
     let id = UUID()
-    let rawLabel: String
-    let start: Double   // video PTS (seconds) when this exercise segment began
-    let end: Double     // video PTS (seconds) when it ended (or current timestamp if still ongoing)
+    let index: Int        // global rep number across the session (1-based)
+    let rawLabel: String  // exercise this rep belongs to
+    let start: Double     // video PTS (seconds) when this rep began
+    let end: Double        // video PTS (seconds) when the counter incremented (rep completed)
 }
 
 /// A snapshot pushed to the UI on every processed frame.
@@ -43,7 +46,7 @@ struct LiveUpdate: Sendable {
     var calibrating: Bool
     var repTotals: [String: Int]        // cumulative raw reps per exercise this session
     var repDurations: [String: Double]  // cumulative active seconds per exercise (for the report)
-    var segments: [SegmentRecord]       // ordered list of exercise segments seen so far
+    var repRecords: [RepRecord]         // per-rep time ranges seen so far (for the report)
 }
 
 nonisolated final class LiveExerciseEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
@@ -137,8 +140,10 @@ nonisolated final class PoseStreamProcessor {
     private var exerciseTotals: [String: Int] = [:]      // committed reps from finished segments
     private var exerciseDurations: [String: Double] = [:] // cumulative active seconds per exercise
     private var previousTimestamp: Double?                 // for per-frame duration deltas
-    private var completedSegments: [SegmentRecord] = []   // finished exercise-type runs
-    private var segmentStartTimestamp: Double?             // PTS when the current segment began
+    private var repRecords: [RepRecord] = []              // per-rep time ranges across the session
+    private var repGlobalIndex = 0                         // running 1-based rep number
+    private var lastCounterReps = 0                        // counter.reps seen last frame (for deltas)
+    private var currentRepStart: Double?                   // PTS when the in-progress rep began
 
     init() {
         if let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
@@ -160,8 +165,10 @@ nonisolated final class PoseStreamProcessor {
         exerciseTotals = [:]
         exerciseDurations = [:]
         previousTimestamp = nil
-        completedSegments = []
-        segmentStartTimestamp = nil
+        repRecords = []
+        repGlobalIndex = 0
+        lastCounterReps = 0
+        currentRepStart = nil
         counter.reset()
     }
 
@@ -175,6 +182,8 @@ nonisolated final class PoseStreamProcessor {
     /// Reset just the rep tally (keeps the current label/history).
     func resetCounter() {
         counter.reset()
+        lastCounterReps = 0
+        currentRepStart = nil
     }
 
     /// Process one frame and return the UI snapshot.
@@ -221,15 +230,11 @@ nonisolated final class PoseStreamProcessor {
                     currentConfidence = prediction.confidence
                     if stable != currentRawLabel {
                         // Commit the finished segment's reps before the counter resets for the new exercise.
-                        if let previous = currentRawLabel {
-                            exerciseTotals[previous, default: 0] += counter.reps
-                            // Close the outgoing segment and record its time range.
-                            if let start = segmentStartTimestamp {
-                                completedSegments.append(SegmentRecord(rawLabel: previous, start: start, end: timestamp))
-                            }
-                        }
+                        if let previous = currentRawLabel { exerciseTotals[previous, default: 0] += counter.reps }
                         currentRawLabel = stable
-                        segmentStartTimestamp = timestamp
+                        // The counter restarts for the new exercise; begin timing its first rep here.
+                        lastCounterReps = 0
+                        currentRepStart = timestamp
                     }
                     counter.setExercise(stable)
                 }
@@ -237,8 +242,20 @@ nonisolated final class PoseStreamProcessor {
         }
 
         // Geometric rep counting every frame once we know the exercise (no-op for standing/walking).
-        if currentRawLabel != nil {
+        if let current = currentRawLabel {
             counter.update(pose: pose, orientedSize: orientedSize)
+            // A rep is "completed" exactly when the counter variable increments. Record the time
+            // range [previous rep's end … now] for each newly counted rep. (Usually one per frame.)
+            if counter.reps > lastCounterReps {
+                for _ in lastCounterReps..<counter.reps {
+                    repGlobalIndex += 1
+                    let start = currentRepStart ?? timestamp
+                    repRecords.append(RepRecord(index: repGlobalIndex, rawLabel: current,
+                                                start: start, end: timestamp))
+                    currentRepStart = timestamp   // the next rep starts where this one ended
+                }
+                lastCounterReps = counter.reps
+            }
         }
 
         // Accrue this frame's elapsed time to the current exercise (label change = clock start/stop).
@@ -247,12 +264,6 @@ nonisolated final class PoseStreamProcessor {
             if dt > 0, dt < 1.0 { exerciseDurations[current, default: 0] += dt }  // ignore seeks/gaps
         }
         previousTimestamp = timestamp
-
-        // Build the live segment list: completed runs + the still-open current one.
-        var liveSegments = completedSegments
-        if let current = currentRawLabel, let start = segmentStartTimestamp {
-            liveSegments.append(SegmentRecord(rawLabel: current, start: start, end: timestamp))
-        }
 
         return LiveUpdate(
             pose: pose,
@@ -264,7 +275,7 @@ nonisolated final class PoseStreamProcessor {
             calibrating: calibrating,
             repTotals: repTotals(),
             repDurations: exerciseDurations,
-            segments: liveSegments
+            repRecords: repRecords
         )
     }
 

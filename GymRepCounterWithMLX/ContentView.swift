@@ -12,8 +12,9 @@ struct ContentView: View {
     @State private var liveGalleryURL: URL?
     @State private var showLiveGallery = false
     @State private var reportItems: [ExerciseCount] = []
-    @State private var reportSegments: [SegmentRecord] = []
+    @State private var reportReps: [RepRecord] = []
     @State private var showReport = false   // true once "Generate Report" is tapped
+    @State private var bodyProfile = UserBodyProfile()   // personalises the calorie estimate
 
     var body: some View {
         NavigationStack {
@@ -22,6 +23,7 @@ struct ContentView: View {
                     if showReport {
                         // Report takes over the screen; the cancel (✕) restores the buttons/views.
                         reportCard
+                        timelineCard
                     } else {
                         liveCameraButton
                         liveGalleryButton
@@ -43,10 +45,11 @@ struct ContentView: View {
         }
         .fullScreenCover(isPresented: $showLiveGallery) {
             if let liveGalleryURL {
-                LiveVideoWorkoutView(url: liveGalleryURL) { items, segments in
+                // Collect the body profile first, then stream + count the video.
+                LiveGalleryFlow(url: liveGalleryURL, profile: $bodyProfile) { items, reps in
                     // Show the report inline on this main screen, then dismiss the player.
                     reportItems = items
-                    reportSegments = segments
+                    reportReps = reps
                     showReport = true
                     showLiveGallery = false
                 }
@@ -123,32 +126,46 @@ struct ContentView: View {
                         .foregroundStyle(.tint)
                         .monospacedDigit()
                 }
-
-                let trackedSet = Set(WorkoutReport.tracked)
-                let trackedSegments = reportSegments.filter { trackedSet.contains($0.rawLabel) }
-                if !trackedSegments.isEmpty {
-                    Divider()
-                    Text("Timeline")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    ForEach(trackedSegments) { seg in
-                        HStack(spacing: 8) {
-                            Text(WorkoutReport.durationString(seg.start) + " – " + WorkoutReport.durationString(seg.end))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(minWidth: 90, alignment: .leading)
-                            Text(ExerciseTypeAnalyzer.displayName(for: seg.rawLabel))
-                                .font(.caption2.weight(.medium))
-                            Spacer()
-                        }
-                    }
-                }
             }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Rep Timeline Card (separate from the report)
+
+    /// A standalone card listing every counted rep with the video time range over which it occurred
+    /// (e.g. "Rep 1 · Push-up   30s – 31s"). Kept as its own card so it reads as a separate entity.
+    @ViewBuilder
+    private var timelineCard: some View {
+        if showReport && !reportReps.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Rep Timeline", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+
+                ForEach(reportReps) { rep in
+                    HStack(spacing: 10) {
+                        Text("Rep \(rep.index)")
+                            .font(.subheadline.weight(.semibold))
+                            .monospacedDigit()
+                            .frame(minWidth: 58, alignment: .leading)
+                        Text(ExerciseTypeAnalyzer.displayName(for: rep.rawLabel))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(WorkoutReport.durationString(rep.start) + " – " + WorkoutReport.durationString(rep.end))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Divider()
+                }
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
     }
 
     /// Trims trailing ".0" so whole numbers read cleanly (e.g. "5" not "5.0", but "2.5" stays).
@@ -392,6 +409,97 @@ struct VideoFile: Transferable {
             try FileManager.default.copyItem(at: received.file, to: dest)
             return VideoFile(url: dest)
         }
+    }
+}
+
+// MARK: - Live from Gallery flow (setup → player)
+
+/// Shows the body-profile setup form first, then the live-video workout screen once the user taps
+/// "Start". Keeps the picked video + profile wiring out of ContentView's body.
+private struct LiveGalleryFlow: View {
+    let url: URL
+    @Binding var profile: UserBodyProfile
+    let onGenerateReport: ([ExerciseCount], [RepRecord]) -> Void
+
+    @State private var started = false
+
+    var body: some View {
+        if started {
+            LiveVideoWorkoutView(url: url, profile: profile, onGenerateReport: onGenerateReport)
+        } else {
+            WorkoutSetupView(profile: $profile) { started = true }
+        }
+    }
+}
+
+// MARK: - Workout Setup (height / weight / gender)
+
+/// Optional body-metrics form shown before the video plays. Blank fields fall back to the
+/// research-based defaults in `UserBodyProfile`; the values personalise the calorie estimate.
+struct WorkoutSetupView: View {
+    @Binding var profile: UserBodyProfile
+    let onStart: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var weightText = ""
+    @State private var heightText = ""
+    @State private var gender: UserBodyProfile.Gender = UserBodyProfile.defaultGender
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Your details (optional)") {
+                    LabeledContent("Weight") {
+                        HStack(spacing: 6) {
+                            TextField("\(Int(UserBodyProfile.defaultWeightKg))", text: $weightText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                            Text("kg").foregroundStyle(.secondary)
+                        }
+                    }
+                    LabeledContent("Height") {
+                        HStack(spacing: 6) {
+                            TextField("\(Int(UserBodyProfile.defaultHeightCm))", text: $heightText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                            Text("cm").foregroundStyle(.secondary)
+                        }
+                    }
+                    Picker("Gender", selection: $gender) {
+                        ForEach(UserBodyProfile.Gender.allCases) { g in
+                            Text(g.display).tag(g)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Section {
+                    Text("Leave weight or height blank to use defaults (\(Int(UserBodyProfile.defaultWeightKg)) kg, \(Int(UserBodyProfile.defaultHeightCm)) cm). These values personalise your calorie estimate.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Workout Setup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Start") { applyAndStart() }
+                }
+            }
+        }
+    }
+
+    /// Parse the fields (falling back to defaults when blank/invalid), store the profile, and begin.
+    private func applyAndStart() {
+        var p = UserBodyProfile()
+        if let w = Double(weightText), w > 0 { p.weightKg = w }
+        if let h = Double(heightText), h > 0 { p.heightCm = h }
+        p.gender = gender
+        profile = p
+        onStart()
     }
 }
 
