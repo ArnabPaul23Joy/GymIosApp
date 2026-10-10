@@ -148,6 +148,7 @@ nonisolated final class PoseStreamProcessor {
     private var repGlobalIndex = 0                         // running 1-based rep number
     private var lastCounterReps = 0                        // counter.reps seen last frame (for deltas)
     private var currentRepStart: Double?                   // PTS when the in-progress rep began
+    private var offsetSeeded: Set<String> = []            // exercises whose display-offset rep(s) are recorded
 
     init() {
         if let url = Bundle.main.url(forResource: "ExerciseClassifier", withExtension: "mlmodelc") {
@@ -173,10 +174,12 @@ nonisolated final class PoseStreamProcessor {
         repGlobalIndex = 0
         lastCounterReps = 0
         currentRepStart = nil
+        offsetSeeded = []
         counter.reset()
     }
 
     /// Cumulative raw reps per exercise: committed finished segments plus the in-progress one.
+    /// (Per-exercise display totals are derived view-side from the big counter; see the view models.)
     private func repTotals() -> [String: Int] {
         var totals = exerciseTotals
         if let current = currentRawLabel { totals[current, default: 0] += counter.reps }
@@ -239,6 +242,17 @@ nonisolated final class PoseStreamProcessor {
                         // The counter restarts for the new exercise; begin timing its first rep here.
                         lastCounterReps = 0
                         currentRepStart = timestamp
+                        // Record the exercise's display-offset rep(s) once (e.g. squat-press's missed
+                        // opening rep) so the per-rep timeline matches the displayed/report count,
+                        // which also adds the same offset.
+                        if !offsetSeeded.contains(stable) {
+                            offsetSeeded.insert(stable)
+                            for _ in 0..<GeometricRepCounter.displayOffset(for: stable) {
+                                repGlobalIndex += 1
+                                repRecords.append(RepRecord(index: repGlobalIndex, rawLabel: stable,
+                                                            start: timestamp, end: timestamp))
+                            }
+                        }
                     }
                     counter.setExercise(stable)
                 }

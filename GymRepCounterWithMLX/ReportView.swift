@@ -82,17 +82,15 @@ enum WorkoutReport {
         return metValue * restingKcalPerMinute(profile) * repMinutes
     }
 
-    /// Builds the report rows from cumulative raw reps + per-exercise active durations. Applies the
-    /// squat-press display offset, computes calories from the displayed count via the personalised
-    /// MET model, and drops zero-count exercises.
+    /// Builds the report rows from the per-exercise display counts (`totals` is derived from the
+    /// big on-screen counter in the view models) + per-exercise active durations. Computes calories
+    /// from the displayed count via the personalised MET model, and drops zero-count exercises.
     static func items(from totals: [String: Int], durations: [String: Double],
                       profile: UserBodyProfile) -> [ExerciseCount] {
         tracked.compactMap { raw in
-            // A key exists only for exercises that were actually detected this session (the offset
-            // for squat-press must survive even when its raw count is 0).
-            guard let rawCount = totals[raw] else { return nil }
-            let count = rawCount + GeometricRepCounter.displayOffset(for: raw)
-            guard count > 0 else { return nil }   // detected but no completed reps → don't list
+            // A key exists only for exercises actually detected this session; drop any with no
+            // completed reps (squat-press's offset keeps it at ≥1 once detected).
+            guard let count = totals[raw], count > 0 else { return nil }
             let calories = Double(count) * kcalPerRep(raw, profile: profile)
             return ExerciseCount(name: ExerciseTypeAnalyzer.displayName(for: raw),
                                  count: count, calories: calories, duration: durations[raw] ?? 0)

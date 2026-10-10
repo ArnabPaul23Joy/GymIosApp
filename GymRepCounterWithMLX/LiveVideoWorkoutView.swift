@@ -63,9 +63,7 @@ struct LiveVideoWorkoutView: View {
     /// in the report's display order.
     private var loggedExercises: [(raw: String, name: String, count: Int)] {
         WorkoutReport.tracked.compactMap { raw in
-            guard let rawCount = viewModel.repTotals[raw] else { return nil }
-            let count = rawCount + GeometricRepCounter.displayOffset(for: raw)
-            guard count > 0 else { return nil }
+            guard let count = viewModel.repTotals[raw], count > 0 else { return nil }
             return (raw, ExerciseTypeAnalyzer.displayName(for: raw), count)
         }
     }

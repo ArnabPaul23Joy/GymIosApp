@@ -24,12 +24,27 @@ final class LiveWorkoutViewModel {
     /// When the current session (re)started — drives the on-screen elapsed timer.
     var sessionStart: Date?
     private(set) var cameraPosition: AVCaptureDevice.Position = .back
-    /// Cumulative raw reps per exercise this session, for the report + the on-screen log.
-    var repTotals: [String: Int] = [:]
     /// Cumulative active seconds per exercise this session, for the report.
     var repDurations: [String: Double] = [:]
     /// Per-rep time ranges detected this session, for the report's rep timeline.
     var repRecords: [RepRecord] = []
+
+    // MARK: Per-exercise totals (derived from the big on-screen counter)
+    //
+    // We trust the big bottom counter (`reps`) as the source of truth. For each exercise we track
+    // that counter while it climbs; when it drops back to 0 (the segment ended / counter reset) we
+    // bank the last non-zero value into that exercise's committed total. The live per-exercise
+    // total shown in the Rep Log / report is the committed total plus the in-progress peak.
+    private var committedTotals: [String: Int] = [:]
+    private var trackingLabel: String?
+    private var trackingPeak = 0
+
+    /// Per-exercise totals for the Rep Log + report: banked segments plus the in-progress one.
+    var repTotals: [String: Int] {
+        var totals = committedTotals
+        if let label = trackingLabel, trackingPeak > 0 { totals[label, default: 0] += trackingPeak }
+        return totals
+    }
 
     var session: AVCaptureSession { engine.session }
 
@@ -64,7 +79,9 @@ final class LiveWorkoutViewModel {
     /// Clears the live count + all report accumulators and restarts the timer (new session).
     private func clearSessionTotals() {
         reps = 0
-        repTotals = [:]
+        committedTotals = [:]
+        trackingLabel = nil
+        trackingPeak = 0
         repDurations = [:]
         repRecords = []
         sessionStart = Date()
@@ -77,11 +94,7 @@ final class LiveWorkoutViewModel {
         confidence = update.confidence
         reps = update.reps
         calibrating = update.calibrating
-        // Keep the peak per exercise (totals are cumulative/monotonic by design) so no stale or
-        // out-of-order update can wipe the tally the report relies on.
-        for (exercise, count) in update.repTotals {
-            repTotals[exercise] = max(repTotals[exercise] ?? 0, count)
-        }
+        trackCounter(reps: update.reps, label: update.rawLabel)
         for (exercise, seconds) in update.repDurations {
             repDurations[exercise] = max(repDurations[exercise] ?? 0, seconds)
         }
@@ -89,6 +102,26 @@ final class LiveWorkoutViewModel {
         if update.repRecords.count >= repRecords.count {
             repRecords = update.repRecords
         }
+    }
+
+    /// Follows the big on-screen counter: track an exercise while its count is non-zero, and bank
+    /// the last non-zero value when the count resets to 0 or the exercise changes.
+    private func trackCounter(reps: Int, label: String?) {
+        if reps > 0, let label {
+            if label != trackingLabel { bankTrackedSegment(); trackingLabel = label }
+            trackingPeak = max(trackingPeak, reps)
+        } else {
+            bankTrackedSegment()   // counter hit 0 → segment finished
+        }
+    }
+
+    /// Adds the current segment's peak to its exercise total, then clears the tracking state.
+    private func bankTrackedSegment() {
+        if let label = trackingLabel, trackingPeak > 0 {
+            committedTotals[label, default: 0] += trackingPeak
+        }
+        trackingLabel = nil
+        trackingPeak = 0
     }
 
     private func requestCameraAccess() async -> Bool {

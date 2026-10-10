@@ -84,13 +84,11 @@ struct LiveWorkoutView: View {
 
     // MARK: - Per-exercise rep count log (overlay)
 
-    /// Each tracked exercise detected so far, with its running rep count (display offset applied),
-    /// in the report's display order.
+    /// Each tracked exercise detected so far, with its running rep count, in display order.
+    /// `repTotals` is derived from the big on-screen counter (see LiveWorkoutViewModel).
     private var loggedExercises: [(raw: String, name: String, count: Int)] {
         WorkoutReport.tracked.compactMap { raw in
-            guard let rawCount = viewModel.repTotals[raw] else { return nil }
-            let count = rawCount + GeometricRepCounter.displayOffset(for: raw)
-            guard count > 0 else { return nil }
+            guard let count = viewModel.repTotals[raw], count > 0 else { return nil }
             return (raw, ExerciseTypeAnalyzer.displayName(for: raw), count)
         }
     }
