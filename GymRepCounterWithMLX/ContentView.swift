@@ -7,27 +7,95 @@ struct ContentView: View {
     @State private var pickerItem: PhotosPickerItem?
     @State private var videoURL: URL?
     @State private var player: AVPlayer?
+    @State private var showLiveCamera = false
+    @State private var liveGalleryPicker: PhotosPickerItem?
+    @State private var liveGalleryURL: URL?
+    @State private var showLiveGallery = false
+    @State private var reportItems: [ExerciseCount] = []
+    @State private var reportReps: [RepRecord] = []
+    @State private var showReport = false   // true once "Generate Report" is tapped
+    @State private var bodyProfile = UserBodyProfile()   // personalises the calorie estimate
+
+    // Collect Data + inference benchmark
+    @State private var collectPicker: PhotosPickerItem?
+    @State private var collectURL: URL?
+    @State private var showCollectData = false
+    @State private var datasetCount = 0
+    @State private var benchmarkResults: [InferenceBenchmarkResult] = []
+    @State private var runningOption: InferenceComputeOption?
+    @State private var benchmarkError: String?
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    videoPickerCard
-                    if videoURL != nil {
-                        exerciseTypeCard
+                    if showReport {
+                        // Report takes over the screen; the cancel (✕) restores the buttons/views.
+                        reportCard
+                        timelineCard
+                    } else {
+                        liveCameraButton
+                        liveGalleryButton
+                        collectDataButton
+                        benchmarkCard
+                        videoPickerCard
+                        if videoURL != nil {
+                            exerciseTypeCard
+                            analyzeButton
+                        }
+                        analysisResultCard
                     }
-                    if !viewModel.frameThumbnails.isEmpty {
-                        framesStripCard
-                    }
-                    if videoURL != nil {
-                        analyzeButton
-                    }
-                    analysisResultCard
                 }
                 .padding()
             }
             .navigationTitle("Gym Rep Counter")
             .navigationBarTitleDisplayMode(.inline)
+        }
+        .onAppear { datasetCount = FeatureCollectionStore.count }
+        .fullScreenCover(isPresented: $showCollectData, onDismiss: { datasetCount = FeatureCollectionStore.count }) {
+            if let collectURL {
+                CollectDataView(url: collectURL)
+            }
+        }
+        .onChange(of: collectPicker) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                guard let vid = try? await newItem.loadTransferable(type: VideoFile.self) else { return }
+                collectURL = vid.url
+                showCollectData = true
+                collectPicker = nil
+            }
+        }
+        .fullScreenCover(isPresented: $showLiveCamera) {
+            // Collect the body profile first, then run the live-camera workout.
+            LiveCameraFlow(profile: $bodyProfile) { items, reps in
+                reportItems = items
+                reportReps = reps
+                showReport = true
+                showLiveCamera = false
+            }
+        }
+        .fullScreenCover(isPresented: $showLiveGallery) {
+            if let liveGalleryURL {
+                // Collect the body profile first, then stream + count the video.
+                LiveGalleryFlow(url: liveGalleryURL, profile: $bodyProfile) { items, reps in
+                    // Show the report inline on this main screen, then dismiss the player.
+                    reportItems = items
+                    reportReps = reps
+                    showReport = true
+                    showLiveGallery = false
+                }
+            }
+        }
+        .onChange(of: liveGalleryPicker) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                guard let vid = try? await newItem.loadTransferable(type: VideoFile.self) else { return }
+                liveGalleryURL = vid.url
+                showReport = false          // clear any previous report when starting a new session
+                showLiveGallery = true
+                liveGalleryPicker = nil
+            }
         }
         .onChange(of: pickerItem) { _, newItem in
             guard let newItem else { return }
@@ -35,14 +103,287 @@ struct ContentView: View {
                 guard let vid = try? await newItem.loadTransferable(type: VideoFile.self) else { return }
                 videoURL = vid.url
                 player = AVPlayer(url: vid.url)
-                // Don't stomp state that an in-flight analysis is still updating.
-                if !viewModel.isAnalyzing {
-                    viewModel.analysisState = .idle
-                    viewModel.frameThumbnails = []
-                }
-                // Upload finished — start recognising the exercise type right away.
-                await viewModel.classifyExercise(url: vid.url)
+                viewModel.analysisState = .idle
+                // Upload finished — track body points and recognise the exercise right away.
+                await viewModel.analyzeUpload(url: vid.url)
             }
+        }
+    }
+
+    // MARK: - Workout Report Card
+
+    private var reportCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Workout Report", systemImage: "doc.text.magnifyingglass")
+                    .font(.headline)
+                Spacer()
+                Button { showReport = false } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if reportItems.isEmpty {
+                Text("No reps counted.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(reportItems) { item in
+                    HStack(spacing: 12) {
+                        Image(systemName: "figure.strengthtraining.traditional")
+                            .foregroundStyle(.tint)
+                            .frame(width: 26)
+                        Text(item.name)
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("\(item.count) reps")
+                                .font(.subheadline.weight(.semibold))
+                                .monospacedDigit()
+                            Text(caloriesString(item.calories) + " kcal · " + WorkoutReport.durationString(item.duration))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    Divider()
+                }
+
+                HStack {
+                    Text("Total calories burnt")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(caloriesString(WorkoutReport.totalCalories(reportItems)) + " kcal")
+                        .font(.headline)
+                        .foregroundStyle(.tint)
+                        .monospacedDigit()
+                }
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Rep Timeline Card (separate from the report)
+
+    /// A standalone card listing every counted rep with the video time range over which it occurred
+    /// (e.g. "Rep 1 · Push-up   30s – 31s"). Kept as its own card so it reads as a separate entity.
+    @ViewBuilder
+    private var timelineCard: some View {
+        if showReport && !reportReps.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Rep Timeline", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+
+                ForEach(reportReps) { rep in
+                    HStack(spacing: 10) {
+                        Text("Rep \(rep.index)")
+                            .font(.subheadline.weight(.semibold))
+                            .monospacedDigit()
+                            .frame(minWidth: 58, alignment: .leading)
+                        Text(ExerciseTypeAnalyzer.displayName(for: rep.rawLabel))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(WorkoutReport.durationString(rep.start) + " – " + WorkoutReport.durationString(rep.end))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Divider()
+                }
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    /// Trims trailing ".0" so whole numbers read cleanly (e.g. "5" not "5.0", but "2.5" stays).
+    private func caloriesString(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+    }
+
+    // MARK: - Live Camera Button
+
+    private var liveCameraButton: some View {
+        Button {
+            showLiveCamera = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "camera.viewfinder")
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Live Camera")
+                        .fontWeight(.semibold)
+                    Text("Count reps in real time")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Live from Gallery Button
+
+    private var liveGalleryButton: some View {
+        PhotosPicker(selection: $liveGalleryPicker, matching: .videos, photoLibrary: .shared()) {
+            HStack(spacing: 10) {
+                Image(systemName: "play.rectangle.on.rectangle")
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Live from Gallery")
+                        .fontWeight(.semibold)
+                    Text("Stream a saved video, counted live")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Collect Data Button
+
+    private var collectDataButton: some View {
+        PhotosPicker(selection: $collectPicker, matching: .videos, photoLibrary: .shared()) {
+            HStack(spacing: 10) {
+                Image(systemName: "square.and.arrow.down.on.square")
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Collect Data")
+                        .fontWeight(.semibold)
+                    Text("Extract model features from a video (no inference)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Inference Benchmark Card
+
+    private var benchmarkCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Model Inference Benchmark", systemImage: "cpu")
+                    .font(.headline)
+                Spacer()
+                Text(datasetCount > 0 ? "\(datasetCount) windows" : "no data")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Runs the Bi-LSTM over the collected data under each compute configuration and measures inference only.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            // 2×2 grid of compute-unit buttons.
+            let columns = [GridItem(.flexible()), GridItem(.flexible())]
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(InferenceComputeOption.allCases) { option in
+                    Button {
+                        runBenchmark(option)
+                    } label: {
+                        HStack(spacing: 6) {
+                            if runningOption == option {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(option.rawValue)
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(datasetCount == 0 || runningOption != nil)
+                }
+            }
+
+            if let benchmarkError {
+                Text(benchmarkError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if !benchmarkResults.isEmpty {
+                Divider()
+                ForEach(orderedBenchmarkResults) { result in
+                    benchmarkRow(result)
+                    Divider()
+                }
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Results in the fixed option order (All, CPU Only, CPU+GPU, CPU+Neural Engine).
+    private var orderedBenchmarkResults: [InferenceBenchmarkResult] {
+        InferenceComputeOption.allCases.compactMap { opt in
+            benchmarkResults.first { $0.configName == opt.rawValue }
+        }
+    }
+
+    private func benchmarkRow(_ r: InferenceBenchmarkResult) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(r.configName)
+                .font(.subheadline.weight(.semibold))
+            Text("\(r.inferenceCount) inferences · \(String(format: "%.1f", r.totalSeconds * 1000)) ms total · \(String(format: "%.3f", r.avgMillis)) ms avg")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Text("CPU \(String(format: "%.1f", r.cpuSeconds * 1000)) ms · peak mem \(memoryString(r.peakMemoryBytes))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func memoryString(_ bytes: Int64) -> String {
+        let kb = Double(bytes) / 1024
+        return kb >= 1024 ? String(format: "%.1f MB", kb / 1024) : String(format: "%.0f KB", kb)
+    }
+
+    /// Load the stored windows and run the Bi-LSTM under `option` off the main thread.
+    private func runBenchmark(_ option: InferenceComputeOption) {
+        runningOption = option
+        benchmarkError = nil
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    let windows = FeatureCollectionStore.load()
+                    return try InferenceBenchmark.run(option: option, windows: windows)
+                }.value
+                benchmarkResults.removeAll { $0.configName == result.configName }
+                benchmarkResults.append(result)
+            } catch {
+                benchmarkError = error.localizedDescription
+            }
+            runningOption = nil
         }
     }
 
@@ -51,9 +392,26 @@ struct ContentView: View {
     private var videoPickerCard: some View {
         VStack(spacing: 12) {
             if let player {
-                VideoPlayer(player: player)
-                    .frame(height: 200)
+                PoseVideoView(player: player, poses: viewModel.poseFrames)
+                    .frame(height: 260)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(alignment: .bottomLeading) {
+                        if viewModel.isClassifyingExercise {
+                            Label("Tracking body points…", systemImage: "figure.walk.motion")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(.black.opacity(0.55), in: Capsule())
+                                .foregroundStyle(.white)
+                                .padding(8)
+                        } else if !viewModel.poseFrames.isEmpty {
+                            Label("Body-point tracking", systemImage: "figure.walk.motion")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(.black.opacity(0.55), in: Capsule())
+                                .foregroundStyle(.white)
+                                .padding(8)
+                        }
+                    }
             } else {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(.quaternary)
@@ -123,53 +481,15 @@ struct ContentView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
-    // MARK: - Frames Strip Card
-
-    private var framesStripCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Sample Frames — \(viewModel.frameThumbnails.count) of \(VideoFrameExtractor.frameCount) shown")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(viewModel.frameThumbnails.enumerated()), id: \.offset) { i, img in
-                        Image(uiImage: img)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 70, height: 70)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(alignment: .topLeading) {
-                                Text("\(i + 1)")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
-                                    .padding(4)
-                            }
-                    }
-                }
-            }
-        }
-        .padding()
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
     // MARK: - Analyze Button
 
     private var analyzeButton: some View {
         Button {
-            guard let url = videoURL else { return }
-            Task { await viewModel.analyzeVideo(url: url) }
+            viewModel.countReps()
         } label: {
             HStack(spacing: 8) {
-                if viewModel.isAnalyzing {
-                    ProgressView().controlSize(.small).tint(.white)
-                } else {
-                    Image(systemName: "figure.strengthtraining.traditional")
-                }
-                Text(analyzeTitle)
+                Image(systemName: "figure.strengthtraining.traditional")
+                Text("Count Reps")
                     .fontWeight(.semibold)
             }
             .frame(maxWidth: .infinity)
@@ -177,7 +497,7 @@ struct ContentView: View {
         }
         .buttonStyle(.borderedProminent)
         .disabled(!viewModel.canAnalyze)
-        .animation(.default, value: viewModel.isAnalyzing)
+        .animation(.default, value: viewModel.canAnalyze)
     }
 
     // MARK: - Result Card
@@ -195,7 +515,7 @@ struct ContentView: View {
                 Text(count == 1 ? "repetition" : "repetitions")
                     .font(.title2)
                     .foregroundStyle(.secondary)
-                Text("counted by RepNet")
+                Text("counted from body-pose geometry")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -217,10 +537,8 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
 
-        case .extractingFrames:
-            progressRow(label: "Extracting 64 frames…", icon: "film")
-        case .runningModel:
-            progressRow(label: "RepNet is counting reps…", icon: "brain")
+        case .counting:
+            progressRow(label: "Counting reps from body points…", icon: "function")
 
         default:
             EmptyView()
@@ -236,16 +554,6 @@ struct ContentView: View {
         }
         .padding()
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    // MARK: - Helpers
-
-    private var analyzeTitle: String {
-        switch viewModel.analysisState {
-        case .extractingFrames:     return "Extracting Frames…"
-        case .runningModel:         return "Counting Reps…"
-        default:                    return "Count Reps"
-        }
     }
 }
 
@@ -263,6 +571,114 @@ struct VideoFile: Transferable {
             try FileManager.default.copyItem(at: received.file, to: dest)
             return VideoFile(url: dest)
         }
+    }
+}
+
+// MARK: - Live from Gallery flow (setup → player)
+
+/// Shows the body-profile setup form first, then the live-video workout screen once the user taps
+/// "Start". Keeps the picked video + profile wiring out of ContentView's body.
+private struct LiveGalleryFlow: View {
+    let url: URL
+    @Binding var profile: UserBodyProfile
+    let onGenerateReport: ([ExerciseCount], [RepRecord]) -> Void
+
+    @State private var started = false
+
+    var body: some View {
+        if started {
+            LiveVideoWorkoutView(url: url, profile: profile, onGenerateReport: onGenerateReport)
+        } else {
+            WorkoutSetupView(profile: $profile) { started = true }
+        }
+    }
+}
+
+/// Shows the body-profile setup form first, then the live-camera workout screen once the user taps
+/// "Start".
+private struct LiveCameraFlow: View {
+    @Binding var profile: UserBodyProfile
+    let onGenerateReport: ([ExerciseCount], [RepRecord]) -> Void
+
+    @State private var started = false
+
+    var body: some View {
+        if started {
+            LiveWorkoutView(profile: profile, onGenerateReport: onGenerateReport)
+        } else {
+            WorkoutSetupView(profile: $profile) { started = true }
+        }
+    }
+}
+
+// MARK: - Workout Setup (height / weight / gender)
+
+/// Optional body-metrics form shown before the video plays. Blank fields fall back to the
+/// research-based defaults in `UserBodyProfile`; the values personalise the calorie estimate.
+struct WorkoutSetupView: View {
+    @Binding var profile: UserBodyProfile
+    let onStart: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var weightText = ""
+    @State private var heightText = ""
+    @State private var gender: UserBodyProfile.Gender = UserBodyProfile.defaultGender
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Your details (optional)") {
+                    LabeledContent("Weight") {
+                        HStack(spacing: 6) {
+                            TextField("\(Int(UserBodyProfile.defaultWeightKg))", text: $weightText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                            Text("kg").foregroundStyle(.secondary)
+                        }
+                    }
+                    LabeledContent("Height") {
+                        HStack(spacing: 6) {
+                            TextField("\(Int(UserBodyProfile.defaultHeightCm))", text: $heightText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                            Text("cm").foregroundStyle(.secondary)
+                        }
+                    }
+                    Picker("Gender", selection: $gender) {
+                        ForEach(UserBodyProfile.Gender.allCases) { g in
+                            Text(g.display).tag(g)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Section {
+                    Text("Leave weight or height blank to use defaults (\(Int(UserBodyProfile.defaultWeightKg)) kg, \(Int(UserBodyProfile.defaultHeightCm)) cm). These values personalise your calorie estimate.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Workout Setup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Start") { applyAndStart() }
+                }
+            }
+        }
+    }
+
+    /// Parse the fields (falling back to defaults when blank/invalid), store the profile, and begin.
+    private func applyAndStart() {
+        var p = UserBodyProfile()
+        if let w = Double(weightText), w > 0 { p.weightKg = w }
+        if let h = Double(heightText), h > 0 { p.heightCm = h }
+        p.gender = gender
+        profile = p
+        onStart()
     }
 }
 

@@ -1,0 +1,86 @@
+// LiveVideoWorkoutViewModel.swift
+// MainActor UI state for the "live from gallery" screen. Owns a LiveVideoExerciseEngine and
+// marshals its per-frame updates onto the main actor for SwiftUI.
+
+import CoreGraphics
+import SwiftUI
+
+@MainActor
+@Observable
+final class LiveVideoWorkoutViewModel {
+
+    private let engine = LiveVideoExerciseEngine()
+    private let url: URL
+
+    var currentFrame: CGImage?
+    var latestPose: PoseFrame?
+    var orientedSize: CGSize = .zero
+    var displayLabel = ""
+    var confidence = 0.0
+    var reps = 0
+    var calibrating = true
+    var finished = false
+    /// Per-exercise totals for the Rep Log + report. Sourced from the engine, which authoritatively
+    /// commits each exercise's finished reps at the moment the exercise changes (so a segment's last
+    /// rep is never lost). Merged with `max` so an out-of-order update can't shrink the tally.
+    var repTotals: [String: Int] = [:]
+    /// Cumulative active seconds per exercise this session, for the report.
+    var repDurations: [String: Double] = [:]
+    /// Per-rep time ranges detected during playback, for the report's rep timeline.
+    var repRecords: [RepRecord] = []
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    func start() {
+        finished = false
+        engine.onUpdate = { [weak self] update in
+            Task { @MainActor [weak self] in self?.apply(update) }
+        }
+        engine.onFinished = { [weak self] in
+            Task { @MainActor [weak self] in self?.finished = true }
+        }
+        engine.start(url: url)
+    }
+
+    func stop() { engine.stop() }
+
+    /// Restart playback + counting from the beginning.
+    func restart() {
+        engine.stop()
+        reps = 0
+        displayLabel = ""
+        confidence = 0
+        calibrating = true
+        finished = false
+        currentFrame = nil
+        latestPose = nil
+        repTotals = [:]
+        repDurations = [:]
+        repRecords = []
+        engine.start(url: url)
+    }
+
+    private func apply(_ update: LiveVideoUpdate) {
+        currentFrame = update.frame
+        latestPose = update.update.pose
+        orientedSize = update.update.orientedSize
+        displayLabel = update.update.displayLabel
+        confidence = update.update.confidence
+        reps = update.update.reps
+        calibrating = update.update.calibrating
+        // Totals/durations are cumulative + monotonic by design; keep the peak so a stale or
+        // out-of-order update can't wipe the tally the Rep Log / report rely on.
+        for (exercise, count) in update.update.repTotals {
+            repTotals[exercise] = max(repTotals[exercise] ?? 0, count)
+        }
+        for (exercise, seconds) in update.update.repDurations {
+            repDurations[exercise] = max(repDurations[exercise] ?? 0, seconds)
+        }
+        // Rep records only ever grow (append-only), so keep whichever snapshot is longest.
+        if update.update.repRecords.count >= repRecords.count {
+            repRecords = update.update.repRecords
+        }
+    }
+}

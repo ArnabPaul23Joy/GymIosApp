@@ -92,6 +92,23 @@ nonisolated final class PoseExerciseClassifier {
         }
         return Prediction(probabilities: (0..<probabilities.count).map { probabilities[$0].doubleValue }, classes: classes)
     }
+
+    // MARK: - Inference-only hooks (for benchmarking)
+    //
+    // These split `predict(_:)` so a benchmark can time ONLY the neural-network forward pass:
+    // build the feature provider (input marshaling / normalisation) up front, then repeatedly call
+    // `rawPredict` — which does nothing but `model.prediction`.
+
+    /// Prepare the model's input for a window (the (value-mean)/std marshaling step).
+    func featureProvider(for window: ResampledWindow) throws -> MLFeatureProvider {
+        try MLDictionaryFeatureProvider(dictionary: ["features": try makeInput(window)])
+    }
+
+    /// Run only the model forward pass on a prepared provider — no input prep, no output parsing.
+    @discardableResult
+    func rawPredict(_ provider: MLFeatureProvider) throws -> MLFeatureProvider {
+        try model.prediction(from: provider)
+    }
 }
 
 /// Majority vote over recent window predictions, for a stable on-screen label.
