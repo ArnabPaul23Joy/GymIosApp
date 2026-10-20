@@ -82,10 +82,11 @@ nonisolated final class StreamingRepCounter {
         }
 
         if extended, s < low {
-            extended = false                 // entered the flexed/contracted phase
+            extended = false                 // reached the LOW extreme (e.g. jump apex)
+            if spec.countOnLow { reps += 1 } // count on the way up (bottom→up) for skipping
         } else if !extended, s > high {
-            reps += 1                        // returned to extended → one full rep
-            extended = true
+            extended = true                  // returned to the HIGH extreme
+            if !spec.countOnLow { reps += 1 }// default: count on the return (angles, press lockout)
         }
     }
 }

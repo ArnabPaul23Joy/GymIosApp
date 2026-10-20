@@ -24,6 +24,11 @@ nonisolated struct RepSignalSpec {
     /// (requires a scale-invariant signal). `minRange` is then unused. Used by the thruster.
     var fixedLow: Double? = nil
     var fixedHigh: Double? = nil
+    /// Which edge of the cycle increments the count. Default counts when the signal returns to its
+    /// HIGH extreme (e.g. an angle re-extending, the thruster locking out overhead). Set true to
+    /// count when the signal reaches its LOW extreme instead — used for skipping, where "low" is
+    /// the top of the jump, so a count fires on the way UP (bottom→up), not on the landing.
+    var countOnLow: Bool = false
 }
 
 nonisolated enum GeometricRepCounter {
@@ -63,7 +68,12 @@ nonisolated enum GeometricRepCounter {
                 avgAngle(f, s, ("left_shoulder", "left_hip", "left_knee"), ("right_shoulder", "right_hip", "right_knee"))
             }, minRange: 100)
         case "skipping":
-            return RepSignalSpec(compute: { f, _ in hipVertical(f) }, minRange: 3.0)
+            // Double-unders: lower arming threshold (was 3.0) so small/shallow OPENING jumps —
+            // which the adaptive range otherwise warms up past — are caught. The hip bob is a % of
+            // frame height, so this is a tuning estimate; too low risks counting standing sway.
+            // countOnLow: count on the way UP (hips reach the apex = signal minimum), not on the
+            // landing — so the jump, not the descent, is what registers.
+            return RepSignalSpec(compute: { f, _ in hipVertical(f) }, minRange: 1.5, countOnLow: true)
         default:
             return nil
         }
@@ -90,8 +100,8 @@ nonisolated enum GeometricRepCounter {
             low = mn + hysteresis * range
             high = mx - hysteresis * range
         }
-        // 5. Schmitt trigger: one rep per extended → flexed → extended cycle.
-        return countCycles(signal, low: low, high: high)
+        // 5. Schmitt trigger: one rep per cycle, incrementing on the configured edge.
+        return countCycles(signal, low: low, high: high, countOnLow: spec.countOnLow)
     }
 
     // MARK: - Rep signals
@@ -188,15 +198,16 @@ nonisolated enum GeometricRepCounter {
         }
     }
 
-    private static func countCycles(_ signal: [Double], low: Double, high: Double) -> Int {
+    private static func countCycles(_ signal: [Double], low: Double, high: Double, countOnLow: Bool) -> Int {
         var reps = 0
-        var extended = signal[0] >= (low + high) / 2
+        var high_ = signal[0] >= (low + high) / 2   // true = currently in the HIGH zone
         for v in signal {
-            if extended, v < low {
-                extended = false
-            } else if !extended, v > high {
-                reps += 1
-                extended = true
+            if high_, v < low {
+                high_ = false
+                if countOnLow { reps += 1 }          // reached the low extreme (e.g. jump apex)
+            } else if !high_, v > high {
+                high_ = true
+                if !countOnLow { reps += 1 }         // returned to the high extreme (default)
             }
         }
         return reps
