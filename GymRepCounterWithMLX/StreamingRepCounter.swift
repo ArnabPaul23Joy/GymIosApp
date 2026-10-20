@@ -56,7 +56,8 @@ nonisolated final class StreamingRepCounter {
         let s = smoothed.map { $0 * (1 - emaAlpha) + value * emaAlpha } ?? value
         smoothed = s
 
-        let low: Double, high: Double
+        var low = Double.nan, high = Double.nan
+        var canCount = true
         if let fixedLow = spec.fixedLow, let fixedHigh = spec.fixedHigh {
             // Absolute thresholds (scale-invariant signal): no warm-up gate, so the first full rep
             // counts immediately and a segment's last rep is never lost to range-building.
@@ -66,27 +67,40 @@ nonisolated final class StreamingRepCounter {
             minValue = min(minValue, s)
             maxValue = max(maxValue, s)
             let range = maxValue - minValue
-            guard range >= spec.minRange else { return }   // adaptive thresholds arm after enough motion
-            low = minValue + GeometricRepCounter.hysteresis * range
-            high = maxValue - GeometricRepCounter.hysteresis * range
+            if range >= spec.minRange {                     // adaptive thresholds arm after enough motion
+                low = minValue + GeometricRepCounter.hysteresis * range
+                high = maxValue - GeometricRepCounter.hysteresis * range
+            } else {
+                canCount = false                            // not armed yet
+            }
         }
 
-        // Seed the phase from the first usable sample so the OPENING rep isn't dropped. If counting
-        // begins while the athlete is already mid-movement (not fully extended), start "flexed" so
-        // the imminent return to full extension counts as rep 1. (Replaces the old hardcoded
-        // extended = true, which silently lost the first rep when counting started mid-rep — the
-        // reason squat-press needed a +1 fudge.)
-        if !armed {
-            armed = true
-            extended = s >= high
+        var counted = false
+        if canCount {
+            // Seed the phase from the first usable sample so the OPENING rep isn't dropped. If
+            // counting begins while the athlete is already mid-movement (not fully extended), start
+            // "flexed" so the imminent return to full extension counts as rep 1.
+            if !armed {
+                armed = true
+                extended = s >= high
+            }
+
+            if extended, s < low {
+                extended = false                 // reached the LOW extreme (e.g. jump apex)
+                if spec.countOnLow { reps += 1; counted = true } // count on the way up (bottom→up) for skipping
+            } else if !extended, s > high {
+                extended = true                  // returned to the HIGH extreme
+                if !spec.countOnLow { reps += 1; counted = true } // default: count on the return
+            }
         }
 
-        if extended, s < low {
-            extended = false                 // reached the LOW extreme (e.g. jump apex)
-            if spec.countOnLow { reps += 1 } // count on the way up (bottom→up) for skipping
-        } else if !extended, s > high {
-            extended = true                  // returned to the HIGH extreme
-            if !spec.countOnLow { reps += 1 }// default: count on the return (angles, press lockout)
+        #if DEBUG
+        // Skipping-only diagnostic: one line per frame. Scan for a trough in `s` that dips but
+        // produces no COUNT — that's an apex the adaptive band swallowed.
+        if exercise == "skipping" {
+            print(String(format: "SKIPDBG s=%.2f min=%.2f max=%.2f low=%.2f high=%.2f ext=%d reps=%d%@",
+                         s, minValue, maxValue, low, high, extended ? 1 : 0, reps, counted ? " <<COUNT" : ""))
         }
+        #endif
     }
 }
