@@ -19,6 +19,11 @@ import Foundation
 nonisolated struct RepSignalSpec {
     let compute: @Sendable (PoseFrame, CGSize) -> Double?
     let minRange: Double
+    /// Optional ABSOLUTE Schmitt thresholds. When set, counting uses these fixed values instead of
+    /// adaptive running min/max — so there's no warm-up and the very first full rep is counted
+    /// (requires a scale-invariant signal). `minRange` is then unused. Used by the thruster.
+    var fixedLow: Double? = nil
+    var fixedHigh: Double? = nil
 }
 
 nonisolated enum GeometricRepCounter {
@@ -31,10 +36,21 @@ nonisolated enum GeometricRepCounter {
     /// nil for exercises that shouldn't be counted (standing / walking / unrecognised).
     static func spec(for exercise: String) -> RepSignalSpec? {
         switch exercise {
-        case "squat", "squatpress":
+        case "squat":
             return RepSignalSpec(compute: { f, s in
                 avgAngle(f, s, ("left_hip", "left_knee", "left_ankle"), ("right_hip", "right_knee", "right_ankle"))
             }, minRange: 30)
+        case "squatpress":
+            // Dumbbell thruster: count one rep per OVERHEAD LOCKOUT — the wrists rising above the
+            // head. The press is the defining feature, so this also rejects partial reps (no full
+            // overhead) and naturally distinguishes a thruster from a plain squat (no press at all).
+            // Signal is wrist height above the head measured in TORSO LENGTHS (scale-invariant, so
+            // camera distance doesn't matter). We use ABSOLUTE thresholds: a rep is an overhead
+            // lockout (> 0.4 torso above the head) after the dumbbells came back down (< 0.1). Fixed
+            // thresholds mean no range warm-up, so the FIRST full press is counted (and the last).
+            // Racked wrists sit ~0.25 below the head (negative), a full lockout ~0.6–0.9 above.
+            return RepSignalSpec(compute: { f, _ in wristsOverhead(f) }, minRange: 0.5,
+                                 fixedLow: 0.1, fixedHigh: 0.4)
         case "pushup", "pullup":
             return RepSignalSpec(compute: { f, s in
                 avgAngle(f, s, ("left_shoulder", "left_elbow", "left_wrist"), ("right_shoulder", "right_elbow", "right_wrist"))
@@ -62,12 +78,18 @@ nonisolated enum GeometricRepCounter {
         guard let filled = interpolateGaps(raw) else { return 0 }
         // 3. Smooth to suppress detector jitter.
         let signal = smooth(filled, radius: smoothingRadius)
-        // 4. Adaptive thresholds from the range of motion.
-        guard let mn = signal.min(), let mx = signal.max() else { return 0 }
-        let range = mx - mn
-        guard range >= spec.minRange else { return 0 }
-        let low = mn + hysteresis * range
-        let high = mx - hysteresis * range
+        // 4. Thresholds: fixed (absolute) if the spec provides them, else adaptive from the range.
+        let low: Double, high: Double
+        if let fixedLow = spec.fixedLow, let fixedHigh = spec.fixedHigh {
+            low = fixedLow
+            high = fixedHigh
+        } else {
+            guard let mn = signal.min(), let mx = signal.max() else { return 0 }
+            let range = mx - mn
+            guard range >= spec.minRange else { return 0 }
+            low = mn + hysteresis * range
+            high = mx - hysteresis * range
+        }
         // 5. Schmitt trigger: one rep per extended → flexed → extended cycle.
         return countCycles(signal, low: low, high: high)
     }
@@ -93,6 +115,28 @@ nonisolated enum GeometricRepCounter {
     private static func hipVertical(_ frame: PoseFrame) -> Double? {
         guard let l = frame.joints["left_hip"], let r = frame.joints["right_hip"] else { return nil }
         return Double(l.y + r.y) / 2 * 100
+    }
+
+    /// How far the wrists are ABOVE the head, measured in TORSO LENGTHS (shoulder→hip distance), so
+    /// it's invariant to how large the athlete appears in frame. Top-left origin, y grows downward:
+    /// positive/large at an overhead lockout, negative when racked at the shoulders. Used for the
+    /// dumbbell thruster — one up-swing per rep. nil if the head, wrists, or torso aren't visible.
+    private static func wristsOverhead(_ frame: PoseFrame) -> Double? {
+        let j = frame.joints
+        // Head reference = the highest visible head keypoint (smallest y). Nose preferred.
+        let headYs = ["nose", "left_eye", "right_eye", "left_ear", "right_ear"].compactMap { j[$0]?.y }
+        guard let headY = headYs.min() else { return nil }
+        let wristYs = ["left_wrist", "right_wrist"].compactMap { j[$0]?.y }
+        guard !wristYs.isEmpty else { return nil }
+        let wristY = wristYs.reduce(CGFloat(0), +) / CGFloat(wristYs.count)
+        // Torso length (shoulder midpoint → hip midpoint) as the scale reference.
+        guard let ls = j["left_shoulder"], let rs = j["right_shoulder"],
+              let lh = j["left_hip"], let rh = j["right_hip"] else { return nil }
+        let dx = Double((ls.x + rs.x) / 2 - (lh.x + rh.x) / 2)
+        let dy = Double((ls.y + rs.y) / 2 - (lh.y + rh.y) / 2)
+        let torso = (dx * dx + dy * dy).squareRoot()
+        guard torso > 0.01 else { return nil }
+        return Double(headY - wristY) / torso   // torso-lengths; wrists above head → positive
     }
 
 

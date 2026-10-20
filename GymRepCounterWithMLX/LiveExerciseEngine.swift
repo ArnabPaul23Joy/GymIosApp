@@ -280,8 +280,13 @@ nonisolated final class PoseStreamProcessor {
                         // The counter restarts for the new exercise; begin timing its first rep here.
                         lastCounterReps = 0
                         currentRepStart = timestamp
+                        counter.setExercise(stable)
+                        // Dumbbell thruster: recognition settles a beat late, so the opening rep is
+                        // performed before counting starts. Credit it the instant the label flips in.
+                        if stable == "squatpress" { counter.seed(1) }
+                    } else {
+                        counter.setExercise(stable)   // no-op when the label is unchanged
                     }
-                    counter.setExercise(stable)
                 }
             }
         }

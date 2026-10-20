@@ -43,21 +43,35 @@ nonisolated final class StreamingRepCounter {
         armed = false
     }
 
+    /// Credit `value` reps immediately (e.g. to recover an opening rep performed before this
+    /// exercise was recognised). Call right after `setExercise`; counting continues from here.
+    func seed(_ value: Int) {
+        reps = value
+    }
+
     /// Feed one frame; no-op when the exercise isn't counted or the signal joints are missing.
     func update(pose: PoseFrame, orientedSize: CGSize) {
         guard let spec, let value = spec.compute(pose, orientedSize) else { return }
 
         let s = smoothed.map { $0 * (1 - emaAlpha) + value * emaAlpha } ?? value
         smoothed = s
-        minValue = min(minValue, s)
-        maxValue = max(maxValue, s)
 
-        let range = maxValue - minValue
-        guard range >= spec.minRange else { return }
-        let low = minValue + GeometricRepCounter.hysteresis * range
-        let high = maxValue - GeometricRepCounter.hysteresis * range
+        let low: Double, high: Double
+        if let fixedLow = spec.fixedLow, let fixedHigh = spec.fixedHigh {
+            // Absolute thresholds (scale-invariant signal): no warm-up gate, so the first full rep
+            // counts immediately and a segment's last rep is never lost to range-building.
+            low = fixedLow
+            high = fixedHigh
+        } else {
+            minValue = min(minValue, s)
+            maxValue = max(maxValue, s)
+            let range = maxValue - minValue
+            guard range >= spec.minRange else { return }   // adaptive thresholds arm after enough motion
+            low = minValue + GeometricRepCounter.hysteresis * range
+            high = maxValue - GeometricRepCounter.hysteresis * range
+        }
 
-        // Seed the phase from the first armed sample so the OPENING rep isn't dropped. If counting
+        // Seed the phase from the first usable sample so the OPENING rep isn't dropped. If counting
         // begins while the athlete is already mid-movement (not fully extended), start "flexed" so
         // the imminent return to full extension counts as rep 1. (Replaces the old hardcoded
         // extended = true, which silently lost the first rep when counting started mid-rep — the
