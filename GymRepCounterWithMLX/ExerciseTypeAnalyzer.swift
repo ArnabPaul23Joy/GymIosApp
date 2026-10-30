@@ -78,6 +78,7 @@ nonisolated enum ExerciseTypeAnalyzer {
         }
         let classifier = try PoseExerciseClassifier(modelURL: modelURL)
         let resampler = classifier.makeResampler()
+        let poseEstimator = YOLOPoseEstimator()
 
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -118,19 +119,18 @@ nonisolated enum ExerciseTypeAnalyzer {
                     nextPrediction = timestamp + classifier.windowSeconds
                 }
 
-                // Pose detection, using the track's display orientation so keypoints are upright.
-                let request = VNDetectHumanBodyPoseRequest()
-                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation).perform([request])
-                let observation = PoseFeatures.closestObservation(request.results)
-
-                if let observation {
-                    let joints = normalisedJoints(from: observation)
-                    if !joints.isEmpty { poses.append(PoseFrame(time: timestamp, joints: joints)) }
-                }
+                // YOLO26 pose (Neural Engine), using the track's display orientation so keypoints are upright.
+                let width = Double(orientedSize.width), height = Double(orientedSize.height)
+                let joints = poseEstimator.joints(pixelBuffer: pixelBuffer, orientation: orientation)
+                if !joints.isEmpty { poses.append(PoseFrame(time: timestamp, joints: joints)) }
 
                 // Feed the classifier's feature pipeline (26 features, oriented pixel space).
-                let features = PoseFeatures.features(from: observation, imageWidth: Double(orientedSize.width),
-                                                     imageHeight: Double(orientedSize.height), timestamp: timestamp)
+                var pixelJoints: [String: SIMD2<Double>] = [:]
+                for (name, point) in joints {
+                    pixelJoints[name] = SIMD2(Double(point.x) * width, Double(point.y) * height)
+                }
+                let features = PoseFeatures.features(fromPixelJoints: pixelJoints,
+                                                     imageWidth: width, imageHeight: height, timestamp: timestamp)
                 resampler.push(features)
 
                 if timestamp >= nextPrediction, resampler.isReady() {
@@ -156,17 +156,6 @@ nonisolated enum ExerciseTypeAnalyzer {
     }
 
     // MARK: - Helpers
-
-    /// Normalised joint locations in upright space, top-left origin (y down).
-    private static func normalisedJoints(from observation: VNHumanBodyPoseObservation) -> [String: CGPoint] {
-        guard let points = try? observation.recognizedPoints(.all) else { return [:] }
-        var result: [String: CGPoint] = [:]
-        for joint in PoseFeatures.joints {
-            guard let point = points[joint.vision], point.confidence > 0.1 else { continue }
-            result[joint.name] = CGPoint(x: point.location.x, y: 1 - point.location.y)
-        }
-        return result
-    }
 
     /// Maps a track's preferred transform to the CGImagePropertyOrientation Vision needs
     /// so keypoints come out in the same upright space the player displays.

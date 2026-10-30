@@ -136,6 +136,7 @@ nonisolated final class PoseStreamProcessor {
     private var resampler: WindowResampler?
     private let smoother = LabelSmoother(size: 12)
     private let counter = StreamingRepCounter()
+    private let poseEstimator = YOLOPoseEstimator()
     private var emaJoints: [String: CGPoint] = [:]
     private var nextPrediction = 0.0
     private var firstTimestamp: Double?
@@ -191,18 +192,14 @@ nonisolated final class PoseStreamProcessor {
         currentRepStart = nil
     }
 
-    /// Vision body-pose → EMA-smoothed PoseFrame + the 26 model features for this frame. Shared by
+    /// YOLO26 pose → EMA-smoothed PoseFrame + the 26 model features for this frame. Shared by
     /// the live counting path (`process`) and the data-collection path (`collect`).
     private func poseAndFeatures(pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation,
                                  timestamp: Double, orientedSize: CGSize) -> (PoseFrame, FrameFeatures) {
         let width = Double(orientedSize.width), height = Double(orientedSize.height)
 
-        let request = VNDetectHumanBodyPoseRequest()
-        try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation).perform([request])
-        let observation = PoseFeatures.closestObservation(request.results)
-
-        // (1) raw keypoints → (2) EMA smoothing.
-        let raw = normalisedJoints(from: observation)
+        // (1) raw keypoints from the YOLO26 pose model (Neural Engine) → (2) EMA smoothing.
+        let raw = poseEstimator.joints(pixelBuffer: pixelBuffer, orientation: orientation)
         let smoothedJoints = smoothKeypoints(raw)
         let pose = PoseFrame(time: timestamp, joints: smoothedJoints)
 
@@ -330,17 +327,6 @@ nonisolated final class PoseStreamProcessor {
     }
 
     // MARK: - Helpers
-
-    /// Normalised joint locations in upright space, top-left origin (y down).
-    private func normalisedJoints(from observation: VNHumanBodyPoseObservation?) -> [String: CGPoint] {
-        guard let observation, let points = try? observation.recognizedPoints(.all) else { return [:] }
-        var result: [String: CGPoint] = [:]
-        for joint in PoseFeatures.joints {
-            guard let point = points[joint.vision], point.confidence > minKeypointConfidence else { continue }
-            result[joint.name] = CGPoint(x: point.location.x, y: 1 - point.location.y)
-        }
-        return result
-    }
 
     /// Per-joint EMA; joints missing this frame are dropped (so the resampler masks them,
     /// matching training) but their last value is retained for reuse.

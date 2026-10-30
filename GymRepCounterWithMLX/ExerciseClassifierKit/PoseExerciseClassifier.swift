@@ -29,7 +29,7 @@ nonisolated final class PoseExerciseClassifier {
     let steps: Int
     let inputs: Int
 
-    init(modelURL: URL, computeUnits: MLComputeUnits = .all) throws {
+    init(modelURL: URL, computeUnits: MLComputeUnits = .cpuAndGPU) throws {
         let configuration = MLModelConfiguration()
         configuration.computeUnits = computeUnits
         model = try MLModel(contentsOf: modelURL, configuration: configuration)
